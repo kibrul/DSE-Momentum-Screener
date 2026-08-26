@@ -17,6 +17,11 @@ from streamlit_autorefresh import st_autorefresh
 from utils.data import get_all_trading_codes, filter_equity_codes, fetch_full_market_history
 from utils.breadth import compute_breadth_stats, breadth_regime_label
 from utils.momentum import build_momentum_screen
+from utils.volume_spike import (
+    build_spike_screen, suggest_threshold_from_history,
+    DEFAULT_TURNOVER_THRESHOLD_MN_TAKA, DEFAULT_VOLUME_THRESHOLD_SHARES,
+    mn_taka_to_crore, crore_to_mn_taka,
+)
 from utils.live import (
     is_market_open, get_market_status_text, fetch_live_snapshot,
     compute_avg_volume, compute_live_breadth,
@@ -95,8 +100,9 @@ if st.session_state.get("fetched"):
 
     st.success(f"Screening {len(price_data)} DSE symbols.")
 
-    tab_breadth, tab_momentum, tab_live = st.tabs(
-        ["📊 Market Breadth (Stockbee)", "🚀 Momentum Screener (Qullamaggie)", "🔴 Live"]
+    tab_breadth, tab_momentum, tab_vol_spike, tab_live = st.tabs(
+        ["📊 Market Breadth (Stockbee)", "🚀 Momentum Screener (Qullamaggie)",
+         "📈 Volume/Turnover Spike Scan", "🔴 Live"]
     )
 
     # ---------------- Breadth tab ----------------
@@ -166,6 +172,86 @@ if st.session_state.get("fetched"):
             with f2:
                 if st.checkbox("Show only Episodic Pivots"):
                     st.dataframe(screen_df[screen_df["Episodic Pivot"]], use_container_width=True)
+
+    # ---------------- Volume/Turnover Spike tab ----------------
+    with tab_vol_spike:
+        st.subheader("Single-Day Volume/Turnover Spike Scan")
+        st.caption(
+            "Flags stocks where at least ONE individual day within the lookback window hit the "
+            "threshold — checked day by day, not as an average. A stock with one huge day and "
+            "otherwise quiet activity still qualifies, even though its average over the window is low."
+        )
+
+        metric_choice = st.radio(
+            "Metric",
+            ["Turnover (Taka) — recommended", "Share Volume"],
+            index=0,
+            help="Turnover is denominated in Taka and is directly comparable across differently "
+                 "priced stocks. Share volume is raw share count, which favors low-priced stocks.",
+        )
+        column = "Value" if metric_choice.startswith("Turnover") else "Volume"
+
+        sv1, sv2 = st.columns(2)
+        with sv1:
+            spike_window = st.number_input("Lookback window (trading days)", min_value=2, max_value=60, value=9)
+        with sv2:
+            if column == "Value":
+                threshold_crore = st.number_input(
+                    "Turnover threshold (single day, Tk crore)", min_value=0.0,
+                    value=mn_taka_to_crore(DEFAULT_TURNOVER_THRESHOLD_MN_TAKA), step=1.0,
+                )
+                threshold = crore_to_mn_taka(threshold_crore)
+            else:
+                threshold = st.number_input(
+                    "Volume threshold (single day, shares)", min_value=0,
+                    value=DEFAULT_VOLUME_THRESHOLD_SHARES, step=100_000, format="%d",
+                )
+
+        with st.expander("Where do these defaults come from? / Get a data-driven threshold instead"):
+            st.markdown(
+                "**Starting defaults** (Tk 10 crore turnover / 2,000,000 shares) come from recent public "
+                "DSE reporting, not a precise statistical study of the full archive:\n"
+                "- Recent DSE weekly recaps show even the **top 3 most actively traded stocks** on DSE "
+                "averaging only ~Tk 25-37 crore/day turnover.\n"
+                "- DSE's average daily **market-wide** turnover (all ~650 stocks combined) has ranged "
+                "roughly Tk 472-997 crore across 2023-2026 (source: DSE annual/FY recaps via The "
+                "Business Standard, BSS).\n"
+                "- Tk 10 crore for a single stock in a single day sits comfortably above typical daily "
+                "turnover for most DSE names, while remaining reachable during a genuine spike.\n\n"
+                "**For a real, data-driven number instead of these estimates**, click below to compute "
+                "actual percentiles from the history you just loaded (up to the lookback window you "
+                "picked in the sidebar, e.g. 1 year) — this reflects DSE's real numbers, not public "
+                "news snippets."
+            )
+            if st.button("Compute empirical percentiles from loaded data"):
+                suggestion = suggest_threshold_from_history(price_data, column=column)
+                if not suggestion:
+                    st.warning("No data available to compute percentiles from.")
+                else:
+                    st.json(suggestion)
+                    if column == "Value":
+                        st.caption(
+                            f"Based on {suggestion['sample_size']} stock-days loaded. "
+                            f"p95 ≈ Tk {suggestion.get('p95_crore')} crore, "
+                            f"p99 ≈ Tk {suggestion.get('p99_crore')} crore — consider setting your "
+                            f"threshold near the p95-p99 range to flag genuinely unusual days rather "
+                            f"than routine activity from the most liquid names."
+                        )
+
+        spike_df = build_spike_screen(price_data, column=column, window=int(spike_window), threshold=threshold)
+
+        if spike_df.empty:
+            label = f"Tk {mn_taka_to_crore(threshold):,.1f} crore" if column == "Value" else f"{threshold:,.0f} shares"
+            st.warning(f"No symbols had a single day with {metric_choice.split(' —')[0].lower()} ≥ {label} within the last {spike_window} trading days.")
+        else:
+            st.success(f"{len(spike_df)} symbols had at least one qualifying spike day within the last {spike_window} trading days.")
+            st.dataframe(spike_df, use_container_width=True, height=500)
+            st.caption(
+                "'Days Ago' counts back from the most recent bar in the window (0 = most recent day). "
+                "'Spike Count' is how many separate days in the window individually cleared the threshold "
+                "— a high count often just means the stock is inherently very liquid (e.g. Beximco), not "
+                "that something unusual happened."
+            )
 
     # ---------------- Live tab ----------------
     with tab_live:

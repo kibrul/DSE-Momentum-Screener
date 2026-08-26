@@ -9,11 +9,40 @@ Mon-Fri US convention — so we use bdshare's own get_market_status(), which
 reads DSE's site directly, instead of hardcoding a weekday/time window.
 """
 import pandas as pd
-from bdshare import get_current_trade_data, get_market_status, BDShareError
+
+try:
+    from bdshare import get_current_trade_data, get_market_status, BDShareError
+    _HAS_MARKET_STATUS = True
+except ImportError:
+    from bdshare import get_current_trade_data
+
+    class BDShareError(Exception):
+        """Fallback stand-in — your installed bdshare predates this class."""
+        pass
+
+    _HAS_MARKET_STATUS = False
+
+
+def _fallback_market_open_guess() -> bool:
+    """
+    Used only if the installed bdshare is too old to have get_market_status().
+    Rough DSE hours check: Sunday-Thursday, ~10:00 AM-2:30 PM Asia/Dhaka.
+    Does not account for market holidays.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("Asia/Dhaka"))
+    if now.weekday() not in (6, 0, 1, 2, 3):  # Sun=6, Mon=0 ... Thu=3 in Python's weekday()
+        return False
+    open_t = now.replace(hour=10, minute=0, second=0, microsecond=0)
+    close_t = now.replace(hour=14, minute=30, second=0, microsecond=0)
+    return open_t <= now <= close_t
 
 
 def is_market_open() -> bool:
     """True if DSE's own site reports the market status as 'Open'."""
+    if not _HAS_MARKET_STATUS:
+        return _fallback_market_open_guess()
     try:
         status = get_market_status()
         return "open" in status.strip().lower()
@@ -22,6 +51,10 @@ def is_market_open() -> bool:
 
 
 def get_market_status_text() -> str:
+    if not _HAS_MARKET_STATUS:
+        guess = _fallback_market_open_guess()
+        return ("Open (estimated — your bdshare version is too old for a live status check)" if guess
+                else "Closed (estimated — your bdshare version is too old for a live status check)")
     try:
         return get_market_status()
     except BDShareError:

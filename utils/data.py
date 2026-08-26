@@ -11,7 +11,18 @@ no per-ticker chunked downloading needed like the NASDAQ/NYSE version.
 """
 import pandas as pd
 import streamlit as st
-from bdshare import get_historical_data, get_current_trading_code, BDShareError
+
+# Defensive import: newer bdshare (>=1.0) exposes get_historical_data() and
+# BDShareError directly; older cached installs (<1.0) only had the legacy
+# get_hist_data() alias and no BDShareError class. This works either way.
+try:
+    from bdshare import get_historical_data, get_current_trading_code, BDShareError
+except ImportError:
+    from bdshare import get_hist_data as get_historical_data, get_current_trading_code
+
+    class BDShareError(Exception):
+        """Fallback stand-in — your installed bdshare predates this class."""
+        pass
 
 # Heuristic keyword/pattern filter for excluding non-common-equity instruments.
 # DSE does not expose a clean "instrument type" field via bdshare, so this is
@@ -71,9 +82,14 @@ def fetch_full_market_history(start_date: str, end_date: str) -> dict[str, pd.Da
         df = group.sort_values("date").set_index("date")
         df = df.rename(columns={
             "open": "Open", "high": "High", "low": "Low",
-            "close": "Close", "volume": "Volume",
+            "close": "Close", "volume": "Volume", "value": "Value",
         })
-        df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+        # "Value" = daily turnover as scraped from DSE's day-end archive table,
+        # in millions of Taka (DSE's own site convention for this table).
+        # Not independently verified against a live fetch from this environment —
+        # sanity-check a known day's figure against dsebd.org after your first run.
+        keep_cols = [c for c in ["Open", "High", "Low", "Close", "Volume", "Value"] if c in df.columns]
+        df = df[keep_cols].dropna(subset=["Open", "High", "Low", "Close", "Volume"])
         if len(df) >= 15:  # need enough bars for MAs / RS lookback to be meaningful
             result[symbol] = df
 
