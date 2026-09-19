@@ -17,13 +17,16 @@ from streamlit_autorefresh import st_autorefresh
 from utils.data import get_all_trading_codes, filter_equity_codes, fetch_full_market_history
 from utils.breadth import compute_breadth_stats, breadth_regime_label
 from utils.momentum import build_momentum_screen
-from utils.volume_spike import build_spike_screen, suggest_threshold_from_history, DEFAULT_VOLUME_THRESHOLD_SHARES
+from utils.volume_spike import (
+    build_spike_screen, suggest_threshold_from_history,
+    DEFAULT_TURNOVER_THRESHOLD_MN_TAKA, DEFAULT_VOLUME_THRESHOLD_SHARES,
+    mn_taka_to_crore, crore_to_mn_taka,
+)
 from utils.live import (
     is_market_open, get_market_status_text, fetch_live_snapshot,
     compute_avg_volume, compute_live_breadth,
 )
 from utils.tendon_pattern import build_tendon_screen, DEFAULT_WINDOW as TENDON_DEFAULT_WINDOW
-from utils.narrow_range_spike import build_narrow_range_spike_screen, DEFAULT_MAX_ABS_PCT as NR_DEFAULT_MAX_ABS_PCT
 
 st.set_page_config(page_title="DSE Momentum & Breadth Screener", layout="wide")
 
@@ -98,9 +101,9 @@ if st.session_state.get("fetched"):
 
     st.success(f"Screening {len(price_data)} DSE symbols.")
 
-    tab_breadth, tab_momentum, tab_vol_spike, tab_narrow_range, tab_tendon, tab_live = st.tabs(
+    tab_breadth, tab_momentum, tab_vol_spike, tab_tendon, tab_live = st.tabs(
         ["📊 Market Breadth (Stockbee)", "🚀 Momentum Screener (Qullamaggie)",
-         "📈 Volume Spike Scan", "🔍 Narrow Range Volume Spike", "🪢 Tendon Pattern", "🔴 Live"]
+         "📈 Volume/Turnover Spike Scan", "🪢 Tendon Pattern", "🔴 Live"]
     )
 
     # ---------------- Breadth tab ----------------
@@ -173,33 +176,52 @@ if st.session_state.get("fetched"):
 
     # ---------------- Volume/Turnover Spike tab ----------------
     with tab_vol_spike:
-        st.subheader("Single-Day Volume Spike Scan")
+        st.subheader("Single-Day Volume/Turnover Spike Scan")
         st.caption(
             "Flags stocks where at least ONE individual day within the lookback window hit the "
-            "volume threshold — checked day by day, not as an average. A stock with one huge day and "
+            "threshold — checked day by day, not as an average. A stock with one huge day and "
             "otherwise quiet activity still qualifies, even though its average over the window is low."
         )
 
-        column = "Volume"
+        metric_choice = st.radio(
+            "Metric",
+            ["Turnover (Taka) — recommended", "Share Volume"],
+            index=0,
+            help="Turnover is denominated in Taka and is directly comparable across differently "
+                 "priced stocks. Share volume is raw share count, which favors low-priced stocks.",
+        )
+        column = "Value" if metric_choice.startswith("Turnover") else "Volume"
 
         sv1, sv2 = st.columns(2)
         with sv1:
             spike_window = st.number_input("Lookback window (trading days)", min_value=2, max_value=60, value=9)
         with sv2:
-            threshold = st.number_input(
-                "Volume threshold (single day, shares)", min_value=0,
-                value=DEFAULT_VOLUME_THRESHOLD_SHARES, step=100_000, format="%d",
-            )
+            if column == "Value":
+                threshold_crore = st.number_input(
+                    "Turnover threshold (single day, Tk crore)", min_value=0.0,
+                    value=mn_taka_to_crore(DEFAULT_TURNOVER_THRESHOLD_MN_TAKA), step=1.0,
+                )
+                threshold = crore_to_mn_taka(threshold_crore)
+            else:
+                threshold = st.number_input(
+                    "Volume threshold (single day, shares)", min_value=0,
+                    value=DEFAULT_VOLUME_THRESHOLD_SHARES, step=100_000, format="%d",
+                )
 
-        with st.expander("Where does this default come from? / Get a data-driven threshold instead"):
+        with st.expander("Where do these defaults come from? / Get a data-driven threshold instead"):
             st.markdown(
-                "**Starting default** (2,000,000 shares) is an informed estimate from public DSE "
-                "reporting, not a precise statistical study of the full archive — a highly liquid "
-                "higher-priced stock (e.g. Square Pharma) has traded as few as ~1.15 million shares "
-                "even on a big-turnover day, while low-priced, high-float names (e.g. Beximco) "
-                "routinely trade 10-30+ million shares on active days.\n\n"
-                "**For a real, data-driven number instead**, click below to compute actual percentiles "
-                "from the history you just loaded — this reflects DSE's real numbers, not public "
+                "**Starting defaults** (Tk 10 crore turnover / 2,000,000 shares) come from recent public "
+                "DSE reporting, not a precise statistical study of the full archive:\n"
+                "- Recent DSE weekly recaps show even the **top 3 most actively traded stocks** on DSE "
+                "averaging only ~Tk 25-37 crore/day turnover.\n"
+                "- DSE's average daily **market-wide** turnover (all ~650 stocks combined) has ranged "
+                "roughly Tk 472-997 crore across 2023-2026 (source: DSE annual/FY recaps via The "
+                "Business Standard, BSS).\n"
+                "- Tk 10 crore for a single stock in a single day sits comfortably above typical daily "
+                "turnover for most DSE names, while remaining reachable during a genuine spike.\n\n"
+                "**For a real, data-driven number instead of these estimates**, click below to compute "
+                "actual percentiles from the history you just loaded (up to the lookback window you "
+                "picked in the sidebar, e.g. 1 year) — this reflects DSE's real numbers, not public "
                 "news snippets."
             )
             if st.button("Compute empirical percentiles from loaded data"):
@@ -208,11 +230,20 @@ if st.session_state.get("fetched"):
                     st.warning("No data available to compute percentiles from.")
                 else:
                     st.json(suggestion)
+                    if column == "Value":
+                        st.caption(
+                            f"Based on {suggestion['sample_size']} stock-days loaded. "
+                            f"p95 ≈ Tk {suggestion.get('p95_crore')} crore, "
+                            f"p99 ≈ Tk {suggestion.get('p99_crore')} crore — consider setting your "
+                            f"threshold near the p95-p99 range to flag genuinely unusual days rather "
+                            f"than routine activity from the most liquid names."
+                        )
 
         spike_df = build_spike_screen(price_data, column=column, window=int(spike_window), threshold=threshold)
 
         if spike_df.empty:
-            st.warning(f"No symbols had a single day with volume ≥ {threshold:,.0f} shares within the last {spike_window} trading days.")
+            label = f"Tk {mn_taka_to_crore(threshold):,.1f} crore" if column == "Value" else f"{threshold:,.0f} shares"
+            st.warning(f"No symbols had a single day with {metric_choice.split(' —')[0].lower()} ≥ {label} within the last {spike_window} trading days.")
         else:
             st.success(f"{len(spike_df)} symbols had at least one qualifying spike day within the last {spike_window} trading days.")
             st.dataframe(spike_df, use_container_width=True, height=500)
@@ -222,72 +253,6 @@ if st.session_state.get("fetched"):
                 "— a high count often just means the stock is inherently very liquid (e.g. Beximco), not "
                 "that something unusual happened."
             )
-
-    # ---------------- Narrow Range Volume Spike tab ----------------
-    with tab_narrow_range:
-        st.subheader("Narrow Range Volume Spike Scan")
-        st.caption(
-            "Flags a high-volume day where price barely moved — a possible quiet accumulation/"
-            "distribution signal (size traded without pushing price around), as opposed to a spike that "
-            "comes with a big directional move."
-        )
-
-        nr_column = "Volume"
-
-        nr_mode_label = st.radio(
-            "Pattern to look for",
-            [
-                "Spike day itself was narrow-range (high volume, that day didn't move much)",
-                "Spike happened recently, and the most recent day is narrow-range now (quiet after the spike)",
-            ],
-            index=0,
-            key="nr_mode_label",
-        )
-        nr_mode = "spike_day" if nr_mode_label.startswith("Spike day itself") else "most_recent_day"
-
-        nr1, nr2 = st.columns(2)
-        with nr1:
-            nr_window = st.number_input("Lookback window (trading days)", min_value=2, max_value=60, value=9, key="nr_window")
-            nr_max_pct = st.number_input(
-                "Narrow-range band (± %, Open→Close)", min_value=0.1, max_value=20.0,
-                value=NR_DEFAULT_MAX_ABS_PCT, step=0.1, key="nr_max_pct",
-            )
-        with nr2:
-            nr_threshold = st.number_input(
-                "Volume threshold (single day, shares)", min_value=0,
-                value=DEFAULT_VOLUME_THRESHOLD_SHARES, step=100_000, format="%d", key="nr_threshold_vol",
-            )
-
-        st.caption(
-            f"\"Narrow range\" means the day's Open→Close % change stayed within ±{nr_max_pct}% — "
-            f"this is the day's own move, not the High-Low range (that's covered by the Momentum "
-            f"tab's Tight Base / ADR% instead)."
-        )
-
-        nr_df = build_narrow_range_spike_screen(
-            price_data, mode=nr_mode, column=nr_column, window=int(nr_window),
-            threshold=nr_threshold, max_abs_pct=nr_max_pct,
-        )
-
-        if nr_df.empty:
-            st.warning(
-                f"No symbols matched this pattern within the last {nr_window} trading days. "
-                f"Try widening the narrow-range band or lowering the threshold."
-            )
-        else:
-            st.success(f"{len(nr_df)} symbols matched this pattern.")
-            st.dataframe(nr_df, use_container_width=True, height=500)
-            if nr_mode == "spike_day":
-                st.caption(
-                    "Shows the most recent day (within the window) that had BOTH a volume "
-                    "spike AND a narrow Open→Close range on that same day. Prices are in BDT (৳)."
-                )
-            else:
-                st.caption(
-                    "Shows symbols where a spike occurred at some point in the window, and the "
-                    "MOST RECENT day is now sitting in a narrow range — the spike and the quiet day "
-                    "can be different days. Prices are in BDT (৳)."
-                )
 
     # ---------------- Tendon Pattern tab ----------------
     with tab_tendon:
