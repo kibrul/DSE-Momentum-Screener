@@ -17,14 +17,19 @@ from streamlit_autorefresh import st_autorefresh
 from utils.data import get_all_trading_codes, filter_equity_codes, fetch_full_market_history
 from utils.breadth import compute_breadth_stats, breadth_regime_label
 from utils.momentum import build_momentum_screen
-from utils.volume_spike import (
-    build_spike_screen, suggest_threshold_from_history,
-    DEFAULT_TURNOVER_THRESHOLD_MN_TAKA, DEFAULT_VOLUME_THRESHOLD_SHARES,
-    mn_taka_to_crore, crore_to_mn_taka,
-)
+from utils.volume_spike import build_spike_screen, suggest_threshold_from_history, DEFAULT_VOLUME_THRESHOLD_SHARES
 from utils.live import (
     is_market_open, get_market_status_text, fetch_live_snapshot,
     compute_avg_volume, compute_live_breadth,
+)
+from utils.tendon_pattern import build_tendon_screen, DEFAULT_WINDOW as TENDON_DEFAULT_WINDOW
+from utils.narrow_range_spike import build_narrow_range_spike_screen, DEFAULT_MAX_ABS_PCT as NR_DEFAULT_MAX_ABS_PCT
+from utils.bullish_pin_bar import build_bullish_pin_bar_screen, DEFAULT_WINDOW as PIN_BAR_DEFAULT_WINDOW
+from utils.pullback_pattern import (
+    build_pullback_screen, pullback_chart_data,
+    DEFAULT_MIN_RUN_DAYS as PB_DEFAULT_MIN_RUN, DEFAULT_MAX_RUN_DAYS as PB_DEFAULT_MAX_RUN,
+    DEFAULT_MAX_PULLBACK_DAYS as PB_DEFAULT_MAX_PULLBACK, DEFAULT_TOUCH_WINDOW as PB_DEFAULT_TOUCH_WINDOW,
+    DEFAULT_TOUCH_TOLERANCE_PCT as PB_DEFAULT_TOLERANCE,
 )
 
 st.set_page_config(page_title="DSE Momentum & Breadth Screener", layout="wide")
@@ -100,9 +105,10 @@ if st.session_state.get("fetched"):
 
     st.success(f"Screening {len(price_data)} DSE symbols.")
 
-    tab_breadth, tab_momentum, tab_vol_spike, tab_live = st.tabs(
+    tab_breadth, tab_momentum, tab_vol_spike, tab_narrow_range, tab_tendon, tab_pin_bar, tab_pullback, tab_live = st.tabs(
         ["📊 Market Breadth (Stockbee)", "🚀 Momentum Screener (Qullamaggie)",
-         "📈 Volume/Turnover Spike Scan", "🔴 Live"]
+         "📈 Volume Spike Scan", "🔍 Narrow Range Volume Spike", "🪢 Tendon Pattern",
+         "🔨 Bullish Pin Bar", "🎯 Pullback Pattern", "🔴 Live"]
     )
 
     # ---------------- Breadth tab ----------------
@@ -175,52 +181,33 @@ if st.session_state.get("fetched"):
 
     # ---------------- Volume/Turnover Spike tab ----------------
     with tab_vol_spike:
-        st.subheader("Single-Day Volume/Turnover Spike Scan")
+        st.subheader("Single-Day Volume Spike Scan")
         st.caption(
             "Flags stocks where at least ONE individual day within the lookback window hit the "
-            "threshold — checked day by day, not as an average. A stock with one huge day and "
+            "volume threshold — checked day by day, not as an average. A stock with one huge day and "
             "otherwise quiet activity still qualifies, even though its average over the window is low."
         )
 
-        metric_choice = st.radio(
-            "Metric",
-            ["Turnover (Taka) — recommended", "Share Volume"],
-            index=0,
-            help="Turnover is denominated in Taka and is directly comparable across differently "
-                 "priced stocks. Share volume is raw share count, which favors low-priced stocks.",
-        )
-        column = "Value" if metric_choice.startswith("Turnover") else "Volume"
+        column = "Volume"
 
         sv1, sv2 = st.columns(2)
         with sv1:
             spike_window = st.number_input("Lookback window (trading days)", min_value=2, max_value=60, value=9)
         with sv2:
-            if column == "Value":
-                threshold_crore = st.number_input(
-                    "Turnover threshold (single day, Tk crore)", min_value=0.0,
-                    value=mn_taka_to_crore(DEFAULT_TURNOVER_THRESHOLD_MN_TAKA), step=1.0,
-                )
-                threshold = crore_to_mn_taka(threshold_crore)
-            else:
-                threshold = st.number_input(
-                    "Volume threshold (single day, shares)", min_value=0,
-                    value=DEFAULT_VOLUME_THRESHOLD_SHARES, step=100_000, format="%d",
-                )
+            threshold = st.number_input(
+                "Volume threshold (single day, shares)", min_value=0,
+                value=DEFAULT_VOLUME_THRESHOLD_SHARES, step=100_000, format="%d",
+            )
 
-        with st.expander("Where do these defaults come from? / Get a data-driven threshold instead"):
+        with st.expander("Where does this default come from? / Get a data-driven threshold instead"):
             st.markdown(
-                "**Starting defaults** (Tk 10 crore turnover / 2,000,000 shares) come from recent public "
-                "DSE reporting, not a precise statistical study of the full archive:\n"
-                "- Recent DSE weekly recaps show even the **top 3 most actively traded stocks** on DSE "
-                "averaging only ~Tk 25-37 crore/day turnover.\n"
-                "- DSE's average daily **market-wide** turnover (all ~650 stocks combined) has ranged "
-                "roughly Tk 472-997 crore across 2023-2026 (source: DSE annual/FY recaps via The "
-                "Business Standard, BSS).\n"
-                "- Tk 10 crore for a single stock in a single day sits comfortably above typical daily "
-                "turnover for most DSE names, while remaining reachable during a genuine spike.\n\n"
-                "**For a real, data-driven number instead of these estimates**, click below to compute "
-                "actual percentiles from the history you just loaded (up to the lookback window you "
-                "picked in the sidebar, e.g. 1 year) — this reflects DSE's real numbers, not public "
+                "**Starting default** (2,000,000 shares) is an informed estimate from public DSE "
+                "reporting, not a precise statistical study of the full archive — a highly liquid "
+                "higher-priced stock (e.g. Square Pharma) has traded as few as ~1.15 million shares "
+                "even on a big-turnover day, while low-priced, high-float names (e.g. Beximco) "
+                "routinely trade 10-30+ million shares on active days.\n\n"
+                "**For a real, data-driven number instead**, click below to compute actual percentiles "
+                "from the history you just loaded — this reflects DSE's real numbers, not public "
                 "news snippets."
             )
             if st.button("Compute empirical percentiles from loaded data"):
@@ -229,20 +216,11 @@ if st.session_state.get("fetched"):
                     st.warning("No data available to compute percentiles from.")
                 else:
                     st.json(suggestion)
-                    if column == "Value":
-                        st.caption(
-                            f"Based on {suggestion['sample_size']} stock-days loaded. "
-                            f"p95 ≈ Tk {suggestion.get('p95_crore')} crore, "
-                            f"p99 ≈ Tk {suggestion.get('p99_crore')} crore — consider setting your "
-                            f"threshold near the p95-p99 range to flag genuinely unusual days rather "
-                            f"than routine activity from the most liquid names."
-                        )
 
         spike_df = build_spike_screen(price_data, column=column, window=int(spike_window), threshold=threshold)
 
         if spike_df.empty:
-            label = f"Tk {mn_taka_to_crore(threshold):,.1f} crore" if column == "Value" else f"{threshold:,.0f} shares"
-            st.warning(f"No symbols had a single day with {metric_choice.split(' —')[0].lower()} ≥ {label} within the last {spike_window} trading days.")
+            st.warning(f"No symbols had a single day with volume ≥ {threshold:,.0f} shares within the last {spike_window} trading days.")
         else:
             st.success(f"{len(spike_df)} symbols had at least one qualifying spike day within the last {spike_window} trading days.")
             st.dataframe(spike_df, use_container_width=True, height=500)
@@ -252,6 +230,289 @@ if st.session_state.get("fetched"):
                 "— a high count often just means the stock is inherently very liquid (e.g. Beximco), not "
                 "that something unusual happened."
             )
+
+    # ---------------- Narrow Range Volume Spike tab ----------------
+    with tab_narrow_range:
+        st.subheader("Narrow Range Volume Spike Scan")
+        st.caption(
+            "Flags a high-volume day where price barely moved — a possible quiet accumulation/"
+            "distribution signal (size traded without pushing price around), as opposed to a spike that "
+            "comes with a big directional move."
+        )
+
+        nr_column = "Volume"
+
+        nr_mode_label = st.radio(
+            "Pattern to look for",
+            [
+                "Spike day itself was narrow-range (high volume, that day didn't move much)",
+                "Spike happened recently, and the most recent day is narrow-range now (quiet after the spike)",
+            ],
+            index=0,
+            key="nr_mode_label",
+        )
+        nr_mode = "spike_day" if nr_mode_label.startswith("Spike day itself") else "most_recent_day"
+
+        nr1, nr2 = st.columns(2)
+        with nr1:
+            nr_window = st.number_input("Lookback window (trading days)", min_value=2, max_value=60, value=9, key="nr_window")
+            nr_max_pct = st.number_input(
+                "Narrow-range band (± %, Open→Close)", min_value=0.1, max_value=20.0,
+                value=NR_DEFAULT_MAX_ABS_PCT, step=0.1, key="nr_max_pct",
+            )
+        with nr2:
+            nr_threshold = st.number_input(
+                "Volume threshold (single day, shares)", min_value=0,
+                value=DEFAULT_VOLUME_THRESHOLD_SHARES, step=100_000, format="%d", key="nr_threshold_vol",
+            )
+
+        st.caption(
+            f"\"Narrow range\" means the day's Open→Close % change stayed within ±{nr_max_pct}% — "
+            f"this is the day's own move, not the High-Low range (that's covered by the Momentum "
+            f"tab's Tight Base / ADR% instead)."
+        )
+
+        nr_df = build_narrow_range_spike_screen(
+            price_data, mode=nr_mode, column=nr_column, window=int(nr_window),
+            threshold=nr_threshold, max_abs_pct=nr_max_pct,
+        )
+
+        if nr_df.empty:
+            st.warning(
+                f"No symbols matched this pattern within the last {nr_window} trading days. "
+                f"Try widening the narrow-range band or lowering the threshold."
+            )
+        else:
+            st.success(f"{len(nr_df)} symbols matched this pattern.")
+            st.dataframe(nr_df, use_container_width=True, height=500)
+            if nr_mode == "spike_day":
+                st.caption(
+                    "Shows the most recent day (within the window) that had BOTH a volume "
+                    "spike AND a narrow Open→Close range on that same day. Prices are in BDT (৳)."
+                )
+            else:
+                st.caption(
+                    "Shows symbols where a spike occurred at some point in the window, and the "
+                    "MOST RECENT day is now sitting in a narrow range — the spike and the quiet day "
+                    "can be different days. Prices are in BDT (৳)."
+                )
+
+    # ---------------- Tendon Pattern tab ----------------
+    with tab_tendon:
+        st.subheader("Tendon Pattern Scan")
+        st.caption(
+            "Looks for a V/U-shaped decline-then-recovery in the 9-day SMA of Close within a rolling "
+            "window, followed AFTER the recovery by a flat, sideways consolidation — the shape: "
+            "rise → peak → rounded trough → recovery to a new high → flat tail. Same logic as the "
+            "USA app's Tendon tab — this is a price-shape pattern, currency-agnostic."
+        )
+
+        tc1, tc2 = st.columns(2)
+        with tc1:
+            tendon_window = st.number_input(
+                "Rolling window (trading days, ~3 months ≈ 63)", min_value=20, max_value=252,
+                value=TENDON_DEFAULT_WINDOW, key="tendon_window",
+            )
+            tendon_min_decline = st.number_input(
+                "Minimum decline into trough (%)", min_value=1.0, max_value=80.0, value=8.0, step=1.0,
+                key="tendon_min_decline",
+            )
+            tendon_min_recovery = st.number_input(
+                "Minimum recovery out of trough (%)", min_value=1.0, max_value=200.0, value=8.0, step=1.0,
+                key="tendon_min_recovery",
+            )
+        with tc2:
+            tendon_consolidation_window = st.number_input(
+                "Consolidation tail length (trading days)", min_value=3, max_value=60, value=12,
+                key="tendon_consolidation_window",
+            )
+            tendon_max_range = st.number_input(
+                "Max consolidation range (%, tighter = flatter)", min_value=0.5, max_value=30.0,
+                value=5.0, step=0.5, key="tendon_max_range",
+            )
+
+        tendon_df, tendon_matches = build_tendon_screen(
+            price_data, window=int(tendon_window), min_decline_pct=tendon_min_decline,
+            min_recovery_pct=tendon_min_recovery, consolidation_window=int(tendon_consolidation_window),
+            max_consolidation_range_pct=tendon_max_range,
+        )
+
+        if tendon_df.empty:
+            st.warning(
+                "No symbols matched this pattern. Try loosening the decline/recovery minimums or "
+                "widening the consolidation range. Note: DSE's smaller universe (~650 stocks vs. "
+                "thousands on NASDAQ+NYSE) means fewer matches are expected even when the pattern "
+                "is genuinely present in the market."
+            )
+        else:
+            st.success(f"{len(tendon_df)} symbols matched the Tendon pattern.")
+            st.dataframe(tendon_df, use_container_width=True, height=400)
+            st.caption(
+                "'Consolidation Range %' is how tight the flat tail is (lower = flatter). "
+                "'Days Since Peak' is how many trading days ago the recovery peak occurred. "
+                "Prices are in BDT (৳)."
+            )
+
+            st.divider()
+            st.subheader("Visual confirmation")
+            chosen_symbol = st.selectbox("Preview MA9 for a matched symbol", tendon_df["Ticker"].tolist())
+            if chosen_symbol:
+                match = tendon_matches[chosen_symbol]
+                ma_series = match["ma9_series"]
+                chart_df = pd.DataFrame({"MA9": ma_series})
+                st.line_chart(chart_df, height=300)
+                st.caption(
+                    f"Trough: {match['trough_date'].strftime('%Y-%m-%d') if hasattr(match['trough_date'], 'strftime') else match['trough_date']} · "
+                    f"Recovery peak: {match['post_peak_date'].strftime('%Y-%m-%d') if hasattr(match['post_peak_date'], 'strftime') else match['post_peak_date']} · "
+                    f"Decline {match['decline_pct']}% · Recovery {match['recovery_pct']}% · "
+                    f"Consolidation range {match['consolidation_range_pct']}%"
+                )
+
+    # ---------------- Bullish Pin Bar tab ----------------
+    with tab_pin_bar:
+        st.subheader("Bullish Pin Bar Scan")
+        st.caption(
+            "Looks for a bullish pin bar / hammer candle on any single day within the last few "
+            "trading days: a small real body sitting near the top of the day's range, a long lower "
+            "wick (rejection of the low), and volume confirming (that day's volume ≥ the prior day's). "
+            "Same logic as the USA app's Bullish Pin Bar tab — pure candle geometry, currency-agnostic."
+        )
+
+        pb1, pb2 = st.columns(2)
+        with pb1:
+            pin_window = st.number_input(
+                "Lookback window (trading days)", min_value=1, max_value=20,
+                value=PIN_BAR_DEFAULT_WINDOW, key="pin_window",
+            )
+            pin_min_lower_wick = st.number_input(
+                "Minimum lower wick (% of day's range)", min_value=20.0, max_value=95.0,
+                value=66.67, step=1.0, key="pin_min_lower_wick",
+            )
+        with pb2:
+            pin_max_upper_wick = st.number_input(
+                "Maximum upper wick (% of day's range, keeps body near the top)", min_value=1.0,
+                max_value=40.0, value=10.0, step=1.0, key="pin_max_upper_wick",
+            )
+            pin_max_body = st.number_input(
+                "Maximum body size (% of day's range)", min_value=5.0, max_value=50.0,
+                value=33.0, step=1.0, key="pin_max_body",
+            )
+
+        pb3, pb4 = st.columns(2)
+        with pb3:
+            pin_require_green = st.checkbox(
+                "Require green body (Close > Open)", value=True, key="pin_require_green",
+                help="Uncheck to also allow a red body, as long as the wick/body shape still qualifies.",
+            )
+        with pb4:
+            pin_require_volume = st.checkbox(
+                "Require volume ≥ prior day", value=True, key="pin_require_volume",
+            )
+
+        pin_df = build_bullish_pin_bar_screen(
+            price_data, window=int(pin_window), min_lower_wick_pct=pin_min_lower_wick,
+            max_upper_wick_pct=pin_max_upper_wick, max_body_pct=pin_max_body,
+            require_green_body=pin_require_green, require_volume_confirmation=pin_require_volume,
+        )
+
+        if pin_df.empty:
+            st.warning(
+                "No symbols matched this pattern within the lookback window. Try loosening the "
+                "wick/body thresholds or unchecking the volume/green-body requirements."
+            )
+        else:
+            st.success(f"{len(pin_df)} symbols had a qualifying bullish pin bar within the last {pin_window} trading days.")
+            st.dataframe(pin_df, use_container_width=True, height=500)
+            st.caption(
+                "'Days Ago' counts back from the most recent bar (0 = most recent day). "
+                "'Lower Wick %' / 'Upper Wick %' / 'Body %' are each as a share of that day's total "
+                "High-Low range, and sum to 100%. Prices are in BDT (৳)."
+            )
+
+    # ---------------- Pullback Pattern tab ----------------
+    with tab_pullback:
+        st.subheader("Pullback Pattern Scan")
+        st.caption(
+            "Condition 1: a strong, almost straight-up run of bullish candles (3-9 days by default). "
+            "Condition 2: a pullback that then comes down and touches the 9-day or 18-day simple moving "
+            "average of Close. Same logic as the USA app's Pullback tab; it is pure price geometry, so it is currency-agnostic."
+        )
+
+        pb_ma_options = {"Either 9MA or 18MA": "either", "9MA only": "9ma", "18MA only": "18ma"}
+
+        pc1, pc2, pc3 = st.columns(3)
+        with pc1:
+            pb_min_run = st.number_input("Min run length (days)", min_value=2, max_value=30,
+                                         value=PB_DEFAULT_MIN_RUN, key="pb_min_run")
+            pb_touch_window = st.number_input(
+                "Touch must be within the last N bars", min_value=1, max_value=10,
+                value=PB_DEFAULT_TOUCH_WINDOW, key="pb_touch_window",
+                help="1 = the most recent bar only. Raise it to also catch touches from the last few days.",
+            )
+        with pc2:
+            pb_max_run = st.number_input("Max run length (days)", min_value=2, max_value=30,
+                                         value=PB_DEFAULT_MAX_RUN, key="pb_max_run")
+            pb_tolerance = st.number_input(
+                "Touch tolerance (% from the MA)", min_value=0.0, max_value=5.0,
+                value=PB_DEFAULT_TOLERANCE, step=0.1, key="pb_tolerance",
+                help="How close the candle's low must get to the MA to count as a touch.",
+            )
+        with pc3:
+            pb_max_pullback = st.number_input(
+                "Max pullback length (days after the peak)", min_value=1, max_value=15,
+                value=PB_DEFAULT_MAX_PULLBACK, key="pb_max_pullback",
+            )
+            pb_ma_label = st.radio("Pullback must touch", list(pb_ma_options), key="pb_ma_choice")
+
+        pk1, pk2, pk3 = st.columns(3)
+        with pk1:
+            pb_strict = st.checkbox(
+                "Strict run: green candles, higher highs & higher lows", value=True, key="pb_strict",
+                help="Uncheck to only require each candle to close above the prior close "
+                     "(allows an occasional red-bodied candle in the run).",
+            )
+        with pk2:
+            pb_hold = st.checkbox(
+                "Touch candle must close at/above the MA", value=True, key="pb_hold",
+                help="Uncheck to also allow a candle that wicks to the MA but closes below it.",
+            )
+        with pk3:
+            pb_uptrend = st.checkbox(
+                "Require 9MA above 18MA", value=False, key="pb_uptrend",
+                help="Uptrend context, as in the reference chart. Off by default so the scan follows "
+                     "the two conditions exactly.",
+            )
+
+        if pb_min_run > pb_max_run:
+            st.error("Min run length can't be greater than max run length.")
+        else:
+            pb_df = build_pullback_screen(
+                price_data, min_run_days=int(pb_min_run), max_run_days=int(pb_max_run),
+                max_pullback_days=int(pb_max_pullback), touch_window=int(pb_touch_window),
+                touch_tolerance_pct=pb_tolerance, ma_choice=pb_ma_options[pb_ma_label],
+                strict_run=pb_strict, require_close_holds_ma=pb_hold, require_ma_uptrend=pb_uptrend,
+            )
+
+            if pb_df.empty:
+                st.warning(
+                    "No symbols matched. Try raising 'Touch must be within the last N bars', widening the "
+                    "touch tolerance, or unchecking the strict-run / close-holds-the-MA options."
+                )
+            else:
+                st.success(f"{len(pb_df)} symbols matched the pullback pattern.")
+                st.dataframe(pb_df, use_container_width=True, height=450)
+                st.caption(
+                    "'Days Ago' = how many bars ago the MA touch happened (0 = latest bar). 'Run Gain %' is the "
+                    "close-to-close gain over the straight-up run; 'Pullback Depth %' is the drop from the peak "
+                    "bar's high to the pullback's lowest low. Prices are in BDT (৳)."
+                )
+
+                st.divider()
+                st.subheader("Visual confirmation")
+                pb_choice = st.selectbox("Preview Close with 9MA / 18MA for a matched symbol",
+                                         pb_df["Ticker"].tolist(), key="pb_preview_ticker")
+                if pb_choice:
+                    st.line_chart(pullback_chart_data(price_data[pb_choice], bars=45), height=300)
 
     # ---------------- Live tab ----------------
     with tab_live:
