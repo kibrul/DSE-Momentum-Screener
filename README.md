@@ -19,21 +19,88 @@ DSE has no official free API. Data here comes from **`bdshare`**, a PyPI package
 - **Live tab**: one call to `get_current_trade_data()` pulls every symbol's latest price at once — so unlike the US app, there's no need to scope this to a small watchlist.
 - **Market hours**: DSE trades **Sunday–Thursday**, ~10:00 AM–2:30 PM Bangladesh Time (BDT) — the opposite weekend convention from US markets. Rather than hardcoding this, the Live tab calls `bdshare`'s `get_market_status()`, which reads DSE's site directly for the actual current status.
 
-## Volume/Turnover Spike tab
+## Volume Spike tab
 
-Flags stocks where at least **one individual day** within a lookback window (default 9 trading days) hit a volume or turnover threshold — checked day by day, not as an average. A stock with one huge day buried among otherwise-quiet days still gets caught, even though its average over the same window looks unremarkable.
+Flags stocks where at least **one individual day** within a lookback window (default 9 trading days) hit a share-volume threshold — checked day by day, not as an average. A stock with one huge day buried among otherwise-quiet days still gets caught, even though its average over the same window looks unremarkable.
 
-Two metrics, selectable in the tab:
-- **Turnover (Taka)** — recommended default, since DSE's currency is Taka and turnover is directly comparable across differently priced stocks (a Tk10 share and a Tk800 share need very different share counts to represent the same money).
-- **Share Volume** — raw share count, favors low-priced/high-float names.
+**Starting default: 2,000,000 shares in a single day.** An informed estimate from public reporting, not a precise statistical study of DSE's full archive (`dsebd.org` wasn't reachable from the sandbox this was built in) — grounded in reporting showing a highly liquid higher-priced stock (Square Pharma) traded only ~1.15 million shares even on a big-turnover day, while low-priced, high-float names (Beximco) routinely trade 10-30+ million shares on active days.
 
-**Starting defaults and their sources** (these are informed estimates from public reporting, not a precise statistical study of DSE's full archive — `dsebd.org` wasn't reachable from the sandbox this was built in, so no live 3-year archive could be pulled directly):
-- **Turnover default: Tk 10 crore (100 million Taka) in a single day.** Recent DSE weekly recaps show even the top 3 most actively traded stocks on DSE averaging only ~Tk 25-37 crore/day turnover; DSE's average daily *market-wide* turnover (all ~650 stocks combined) has ranged roughly Tk 472-997 crore across 2023-2026 (sources: The Business Standard's DSE annual/FY recaps, BSS/DSE FY26 report). Tk 10 crore for a *single stock* on a *single day* sits comfortably above typical daily turnover for most DSE names while remaining achievable during a genuine spike.
-- **Share volume default: 2,000,000 shares in a single day.** Grounded in reporting showing a highly liquid higher-priced stock (Square Pharma) traded only ~1.15 million shares even on a big-turnover day, while low-priced, high-float names (Beximco) routinely trade 10-30+ million shares on active days.
+**For a real, data-driven threshold** instead of this estimate, use the "Compute empirical percentiles from loaded data" button in the tab's expander — it calculates actual percentiles (p90/p95/p99) from whatever history you loaded via the sidebar. Since your machine can reach `dsebd.org` directly (unlike the sandbox this was built in), this is the more trustworthy number for your own use.
 
-**For a real, data-driven threshold** instead of these estimates, use the "Compute empirical percentiles from loaded data" button in the tab's expander — it calculates actual percentiles (p90/p95/p99) from whatever history you loaded via the sidebar, which reflects DSE's real recent numbers rather than a handful of news snippets. Since your machine can reach `dsebd.org` directly (unlike the sandbox this was built in), this is the more trustworthy number for your own use.
+Note: `utils/volume_spike.py` still supports a Taka-turnover metric internally (used by the earlier design), but the UI now only exposes Share Volume, per preference.
 
-**Caveat on units**: the turnover ("Value") field is scraped directly from DSE's day-end archive table and assumed to be in millions of Taka, per DSE's own site convention — this wasn't independently verified against a live fetch. Sanity-check a known day's turnover figure against dsebd.org after your first run; if the units are off, the "Compute empirical percentiles" button will make it obvious (the numbers will look implausibly large or small).
+## Narrow Range Volume Spike tab
+
+Same pattern as the USA app's Narrow Range Volume Spike tab: flags a high-volume day where price barely moved — a possible quiet accumulation/distribution signal, as opposed to a spike that comes with a big directional move (already covered by the regular Volume Spike Scan tab).
+
+Uses **Share Volume** only (default threshold: 2,000,000 shares), same as the Volume Spike Scan tab.
+
+"Narrow range" means the day's **Open-to-Close** % change stayed within a tight band (default ±1.9%) — not the High-Low range (covered by the Momentum tab's Tight Base / ADR% instead).
+
+Two selectable modes:
+- **Spike day itself was narrow-range**: the day with the volume spike is also the day that didn't move much.
+- **Spike happened recently, most recent day is narrow-range now**: a spike occurred somewhere in the lookback window, and the most recent day is currently sitting in a tight range — spike day and quiet day can differ.
+
+All parameters (mode, lookback window, volume threshold, narrow-range band) are adjustable in the tab.
+
+## Tendon Pattern tab
+
+Identical logic to the USA app's Tendon tab — this is a pure price-shape pattern (based on the 9-day SMA of Close), so it's currency-agnostic and needed no DSE-specific changes. Looks for: rise → peak → rounded V/U trough → recovery to a new high → flat sideways tail, within a rolling window (default ~63 trading days ≈ 3 months).
+
+All five parameters (window, min decline %, min recovery %, consolidation tail length, max consolidation range %) are adjustable in the tab, with a "Visual confirmation" chart of the matched symbol's MA9 line.
+
+**Note on match count**: DSE's much smaller universe (~650 stocks vs. thousands on NASDAQ+NYSE) means you should expect far fewer matches even when the pattern is genuinely present in the market — don't read a low count as the scanner being broken.
+
+## Bullish Pin Bar tab
+
+Identical logic to the USA app's Bullish Pin Bar tab — pure candle geometry (Open/High/Low/Close), so it's currency-agnostic and needed no DSE-specific changes. Scans the last few trading days (default 3) for a bullish pin bar / hammer candle on any single day within that window:
+- **Small real body near the top** of the day's range (max upper wick 10% of range by default).
+- **Long lower wick** — at least two-thirds (66.67%) of the day's total range by default.
+- **Volume confirmation** — that day's volume ≥ the prior day's (toggle-able).
+- **Green body** (Close > Open) required by default, can be unchecked.
+
+All thresholds are adjustable in the tab. Tested at DSE-scale (Taka) prices with the extra `Value` (turnover) column present — unaffected, since the pattern only reads Open/High/Low/Close/Volume.
+
+## Pullback Pattern tab
+
+Finds the "3-9 day straight up, then pullback to the 9 or 18 MA" setup. Two conditions:
+
+1. **Run**: bullish candles going almost straight up for 3-9 days (adjustable). *Strict* mode (default) needs every run candle to be green with a higher high and a higher low than the candle before it; unchecking it relaxes that to "closes above the prior close", which allows an occasional red-bodied candle. The run is the unbroken streak ending at the peak bar, and the candle right after the peak must not continue it (so an 11-day run can't pass as a 9-day one).
+2. **Pullback**: after the peak, price comes down (the pullback's lowest low drops below the peak candle's low) and a candle reaches the **9-period or 18-period simple moving average of Close**. A "touch" means the candle's low came down to the MA (within a tolerance, default 0.5%) and, by default, the candle still closed at/above it, so a decisive break below the MA doesn't count.
+
+Settings in the tab: run length range, max days between peak and touch (default 5), how many of the latest bars may hold the touch (default 1 = the latest bar only), touch tolerance, which MA (either / 9MA only / 18MA only), strict run, close-holds-the-MA, and an optional **Require 9MA above 18MA** (uptrend context as in the reference chart; off by default so the scan follows the two conditions exactly). A "Visual confirmation" chart plots Close with MA9 and MA18 for any matched symbol.
+
+If the match list is too long, tighten it with a higher minimum run length, the 9MA > 18MA option, or a smaller touch tolerance.
+
+Tested against constructed cases for every rule (match, run too short/long, pullback stopping short of the MA, closing through the MA, red candle inside the run, touch too old, touch too many days after the peak, shallow dip that never pulls back, zero-price bad data, a downtrend bounce with and without the 9MA > 18MA option) and by running both real apps headlessly with injected data. Not yet checked against live market data, since the sandbox it was built in can't reach Yahoo Finance or dsebd.org. The logic is pure OHLC/moving-average geometry, so it is identical to the USA app's and needs no BDT-specific changes.
+
+## Anticipation tab
+
+Finds the "3-9 day straight up, then narrow-range sideways" coil, still in progress on the latest bar. Two conditions:
+
+1. **Run**: bullish candles going almost straight up for 3-9 days (adjustable). *Strict* mode (default) needs every run candle to be green with a higher high and a higher low than the one before; unchecking it relaxes that to "closes above the prior close", which allows an occasional red-bodied candle. The run must end at the peak bar.
+2. **Consolidation**: the most recent 3-9 candles after the peak move sideways in a very narrow box. The box is the whole range, highest High vs lowest Low, and must be within **2.5%** by default. A second check, **max give-back from the peak close** (default 3%), keeps the base up near the highs so "run, crash, then go flat" doesn't match.
+
+The consolidation must run right up to the latest bar, so a base that has already broken out is not listed. Bases containing zero-volume (no-trade) days or zero-price rows are skipped, since a frozen price isn't a real base. The table is sorted tightest base first and includes the box high/low and "To Breakout %" (distance from the last close to the box high, the trigger level). A "Visual confirmation" chart draws Close with the box high/low over the base.
+
+Tested against constructed cases for every rule (match, base too short/long, box too wide, run too short/long, base sitting well below the peak, zero-volume day, zero-price data, red candle in the run, a first base candle that ticks up and extends the run, a breakout candle on the latest bar, too little history, no Volume column) and by running the real app headlessly with injected data. Not yet checked against live market data, since the sandbox it was built in can't reach Yahoo Finance or dsebd.org. The logic is pure OHLC geometry, so it is identical to the USA app's with no BDT-specific changes; the zero-volume guard matters most here, because thinly traded DSE stocks can have frozen-price days.
+
+## Gap-Up Scan tab
+
+Finds symbols that **gapped up ≥ 9% in a single day on big volume**, on any day in the last month, or in the latest session only.
+
+- **Gap** = the day's **Open** versus DSE's **YCP**, the exchange-adjusted previous close, which already reflects dividends and bonus shares. Measuring against the raw previous close would miss real gaps on those dates (for example a 1:1 bonus halves the price, so the raw comparison reads about -50%). If YCP is missing the previous close is used. Default minimum 9%.
+- **Big volume** = that day's share volume is at least **RVOL** times its average over the 20 *traded* days before it (default 2.0x), plus an optional minimum share count (default off). Zero-volume "no-trade" days are left out of that average, so a thinly traded stock can't look like it has a volume spike just because it often doesn't trade. A stock needs at least 10 traded days in the prior 20 to get an RVOL, and the gap day itself must have traded.
+- **Scope**: "Any day in the last N trading days" (default 21, about one month) or "Current day only (latest session)".
+- **One row per symbol**, showing its most recent qualifying day, newest first, with the gap %, open-to-close change on the gap day, volume, RVOL, **Since Gap %** (follow-through) and the number of qualifying days in range. A chart shows Close with the reference close as a flat line, so you can see whether the gap is holding.
+
+**"Current day" on DSE:** this scan reads DSE's day-end archive, which is published after the close, and DSE's live feed (`get_current_trade_data`) has **no opening price**, so a gap can't be measured while the session is running. "Current day" means the latest completed session in the loaded data. The tab says so while the market is open; for intraday movers use the Live tab (its "Intraday EP" flag).
+
+**Price limits:** DSE caps how far a stock can move in a day, and that limit has changed over time, so a 9% opening gap may be unreachable when a tighter limit is in force. When a scan comes back empty, the tab shows the **largest opening gap-up actually found** in the range (ignoring volume), so you can lower "Min gap up" to a level that exists.
+
+`utils/data.py` now keeps the `YCP` column (the earlier version dropped it). Update both files together for the exact YCP-based gap; with an older `data.py` the scan still runs but falls back to the previous close.
+
+Tested against constructed cases for every rule (gap too small, volume too light, below an absolute minimum, gap older than the window, latest-session mode, two gap days, zero/NaN open data, a gap that sells off, too little volume history, a bonus-share YCP adjustment, a thinly traded stock, a zero-volume gap day, the largest-gap helper) and by running the real app headlessly with planted data. Not yet checked against live dsebd.org data, since the sandbox it was built in can't reach it.
 
 ## What it does
 

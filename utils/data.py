@@ -82,13 +82,15 @@ def fetch_full_market_history(start_date: str, end_date: str) -> dict[str, pd.Da
         df = group.sort_values("date").set_index("date")
         df = df.rename(columns={
             "open": "Open", "high": "High", "low": "Low",
-            "close": "Close", "volume": "Volume", "value": "Value",
+            "close": "Close", "volume": "Volume", "value": "Value", "ycp": "YCP",
         })
         # "Value" = daily turnover as scraped from DSE's day-end archive table,
         # in millions of Taka (DSE's own site convention for this table).
         # Not independently verified against a live fetch from this environment —
         # sanity-check a known day's figure against dsebd.org after your first run.
-        keep_cols = [c for c in ["Open", "High", "Low", "Close", "Volume", "Value"] if c in df.columns]
+        # "YCP" = DSE's own adjusted previous close (already reflects dividends / bonus shares); the Gap-Up Scan
+        # measures gaps against it. Optional: consumers fall back to the previous Close if it is absent.
+        keep_cols = [c for c in ["Open", "High", "Low", "Close", "Volume", "Value", "YCP"] if c in df.columns]
         df = df[keep_cols].dropna(subset=["Open", "High", "Low", "Close", "Volume"])
         if len(df) >= 15:  # need enough bars for MAs / RS lookback to be meaningful
             result[symbol] = df

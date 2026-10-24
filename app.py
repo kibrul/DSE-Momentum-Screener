@@ -37,6 +37,11 @@ from utils.anticipation_pattern import (
     DEFAULT_MIN_CONSOLIDATION_DAYS as AN_MIN_CONS, DEFAULT_MAX_CONSOLIDATION_DAYS as AN_MAX_CONS,
     DEFAULT_MAX_RANGE_PCT as AN_MAX_RANGE, DEFAULT_MAX_DROP_FROM_PEAK_PCT as AN_MAX_DROP,
 )
+from utils.gap_up_scan import (
+    build_gap_up_screen, gap_chart_data, largest_gap_up,
+    DEFAULT_WINDOW as GAP_WINDOW, DEFAULT_MIN_GAP_PCT as GAP_MIN_PCT,
+    DEFAULT_MIN_RVOL as GAP_MIN_RVOL, DEFAULT_MIN_VOLUME as GAP_MIN_VOL,
+)
 
 st.set_page_config(page_title="DSE Momentum & Breadth Screener", layout="wide")
 
@@ -111,10 +116,10 @@ if st.session_state.get("fetched"):
 
     st.success(f"Screening {len(price_data)} DSE symbols.")
 
-    tab_breadth, tab_momentum, tab_vol_spike, tab_narrow_range, tab_tendon, tab_pin_bar, tab_pullback, tab_anticipation, tab_live = st.tabs(
+    tab_breadth, tab_momentum, tab_vol_spike, tab_narrow_range, tab_tendon, tab_pin_bar, tab_pullback, tab_anticipation, tab_gap, tab_live = st.tabs(
         ["📊 Market Breadth (Stockbee)", "🚀 Momentum Screener (Qullamaggie)",
          "📈 Volume Spike Scan", "🔍 Narrow Range Volume Spike", "🪢 Tendon Pattern",
-         "🔨 Bullish Pin Bar", "🎯 Pullback Pattern", "🔮 Anticipation", "🔴 Live"]
+         "🔨 Bullish Pin Bar", "🎯 Pullback Pattern", "🔮 Anticipation", "⬆️ Gap-Up Scan", "🔴 Live"]
     )
 
     # ---------------- Breadth tab ----------------
@@ -594,6 +599,91 @@ if st.session_state.get("fetched"):
                                                 bars=40),
                         height=300,
                     )
+
+    # ---------------- Gap-Up Scan tab ----------------
+    with tab_gap:
+        st.subheader("Gap-Up Scan")
+        st.caption(
+            "Finds stocks that gapped up by at least the chosen % in a single day on big volume. A gap is the "
+            "day's OPEN versus DSE's YCP (the exchange-adjusted previous close, so dividends and bonus shares "
+            "don't distort it; the previous close is used if YCP is missing). 'Big volume' means that day's "
+            "share volume is at least RVOL times its average over the 20 traded days before it (days with no "
+            "trades are left out of that average), and, optionally, a minimum share count. Prices are in BDT (৳)."
+        )
+
+        gap_scope = st.radio(
+            "Check", ["Any day in the last N trading days", "Current day only (latest session)"],
+            horizontal=True, key="gap_scope",
+        )
+        gap_latest_only = gap_scope.startswith("Current day")
+
+        gc1, gc2, gc3, gc4 = st.columns(4)
+        with gc1:
+            gap_window = st.number_input(
+                "Last N trading days (21 = about 1 month)", min_value=2, max_value=120, value=GAP_WINDOW,
+                key="gap_window", disabled=gap_latest_only,
+            )
+        with gc2:
+            gap_min_pct = st.number_input("Min gap up (%)", min_value=1.0, max_value=100.0, value=GAP_MIN_PCT,
+                                          step=0.5, key="gap_min_pct")
+        with gc3:
+            gap_min_rvol = st.number_input(
+                "Min RVOL (x 20-day avg volume)", min_value=0.0, max_value=50.0, value=GAP_MIN_RVOL,
+                step=0.5, key="gap_min_rvol",
+            )
+        with gc4:
+            gap_min_volume = st.number_input(
+                "Min volume (shares, 0 = off)", min_value=0, value=GAP_MIN_VOL, step=50_000, format="%d",
+                key="gap_min_volume",
+            )
+
+        if is_market_open():
+            st.info(
+                "🟢 DSE is open. This scan uses DSE's day-end data, which is published after the close, and DSE's "
+                "live feed has no opening price, so today's gap can't be measured until the session ends. "
+                "'Current day' therefore means the latest completed session in the loaded data. For intraday "
+                "movers use the Live tab."
+            )
+
+        gap_df = build_gap_up_screen(
+            price_data, window=int(gap_window), min_gap_pct=gap_min_pct, min_rvol=gap_min_rvol,
+            min_volume=gap_min_volume, latest_only=gap_latest_only,
+        )
+
+        scope_label = "in the latest session" if gap_latest_only else f"in the last {int(gap_window)} trading days"
+        if gap_df.empty:
+            msg = f"No symbols gapped up ≥ {gap_min_pct:g}% on ≥ {gap_min_rvol:g}x volume {scope_label}."
+            best = largest_gap_up(price_data, window=int(gap_window), latest_only=gap_latest_only)
+            if best:
+                best_date = best[2].strftime("%Y-%m-%d") if hasattr(best[2], "strftime") else str(best[2])
+                msg += (f" The largest opening gap-up in this range was {best[1]:g}% ({best[0]}, {best_date}), "
+                        "ignoring volume. DSE's daily price limit caps how far a stock can open, so if that is "
+                        "below your minimum, lower 'Min gap up'.")
+            else:
+                msg += " Try a smaller gap, a lower RVOL, or a longer window."
+            st.warning(msg)
+        else:
+            st.success(f"{len(gap_df)} symbols gapped up ≥ {gap_min_pct:g}% on ≥ {gap_min_rvol:g}x volume {scope_label}.")
+            st.dataframe(gap_df, use_container_width=True, height=450)
+            st.caption(
+                "One row per symbol, showing its most recent qualifying day (newest first). 'Days Ago' 0 = the "
+                "latest bar. 'Prev Close' is the reference used for the gap (YCP when available). 'Day Change %' "
+                "is open→close on the gap day (a gap can still fade). 'Since Gap %' is the last close versus the "
+                "gap-day close, i.e. the follow-through since. 'Gap Days' counts how many qualifying days the "
+                "symbol had in the range. Prices are in BDT (৳)."
+            )
+
+            st.divider()
+            st.subheader("Visual confirmation")
+            gap_choice = st.selectbox("Preview Close and the pre-gap close for a matched symbol",
+                                      gap_df["Ticker"].tolist(), key="gap_preview_ticker")
+            if gap_choice:
+                grow = gap_df[gap_df["Ticker"] == gap_choice].iloc[0]
+                st.line_chart(
+                    gap_chart_data(price_data[gap_choice], grow["Gap Date"], float(grow["Prev Close"]), bars=60),
+                    height=300,
+                )
+                st.caption("The flat line is the reference close before the gap; price holding above it means the gap is holding.")
 
     # ---------------- Live tab ----------------
     with tab_live:
