@@ -62,12 +62,12 @@ with st.sidebar:
         format_func=lambda d: f"{d} days (~{d // 30} months)",
         index=1,
     )
-    min_price = st.number_input("Min last close (BDT)", min_value=0.0, value=6.0, step=1.0)
-    max_price = st.number_input("Max last close (BDT)", min_value=0.0, value=9000.0, step=1.0,
+    min_price = st.number_input("Min last close (BDT)", min_value=0.0, value=0.0, step=1.0)
+    max_price = st.number_input("Max last close (BDT)", min_value=0.0, value=0.0, step=1.0,
                                  help="Leave at 0 for no upper limit.")
 
     st.header("Momentum Screen Settings")
-    min_rs_rank = st.slider("Minimum RS Rank (percentile)", 50, 99, 60)
+    min_rs_rank = st.slider("Minimum RS Rank (percentile)", 50, 99, 80)
 
     run_button = st.button("Run Screen", type="primary", use_container_width=True)
 
@@ -86,6 +86,12 @@ if run_button:
         f"({start_date.isoformat()} to {end_date.isoformat()}) in a single request..."
     )
     price_data = fetch_full_market_history(start_date.isoformat(), end_date.isoformat())
+
+    if not all_codes:
+        # DSE's trading-code list is unreachable from this host (e.g. blocked on a cloud server): use the symbols
+        # found in the price history itself, otherwise the equity filter below would drop every symbol.
+        all_codes = sorted(price_data)
+        codes_to_keep = filter_equity_codes(all_codes) if equities_only else all_codes
 
     if equities_only:
         price_data = {k: v for k, v in price_data.items() if k in set(codes_to_keep)}
@@ -109,7 +115,8 @@ if st.session_state.get("fetched"):
 
     if not price_data:
         st.error(
-            "No price data returned. This can mean dsebd.org is temporarily unreachable, "
+            "No price data to screen. Either DSE couldn't be reached and there is no saved snapshot "
+            "(see the message above and the README: run update_dse_snapshot.py and commit data/dse_history.csv.gz), "
             "or your filters excluded everything — try widening the price range or the lookback window."
         )
         st.stop()

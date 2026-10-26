@@ -102,6 +102,34 @@ Finds symbols that **gapped up ≥ 9% in a single day on big volume**, on any da
 
 Tested against constructed cases for every rule (gap too small, volume too light, below an absolute minimum, gap older than the window, latest-session mode, two gap days, zero/NaN open data, a gap that sells off, too little volume history, a bonus-share YCP adjustment, a thinly traded stock, a zero-volume gap day, the largest-gap helper) and by running the real app headlessly with planted data. Not yet checked against live dsebd.org data, since the sandbox it was built in can't reach it.
 
+## Running on Streamlit Community Cloud (DSE refuses cloud servers)
+
+If the deployed app shows *"Could not fetch DSE market history ... Failed to GET after 3 retries ... Last error: None"* but it works on your own computer, DSE's servers are answering every request with a non-200 HTTP status (that is what `Last error: None` means: no network error, just a refusal). They are blocking the cloud host's IP address, so no code change can make the deployed app download directly. The fix is a **saved snapshot** that you create where DSE works and commit to the repo:
+
+1. **On your desktop** (where the app already works), from the project folder:
+   ```bash
+   python update_dse_snapshot.py
+   ```
+   This downloads the whole market's history and writes `data/dse_history.csv.gz` (roughly 5-10 MB for the default 400 days; `--days 800` keeps longer). It merges into any existing snapshot, so history only grows, and it never overwrites the file if the download fails.
+2. **Commit and push it** (make sure `data/` and `*.gz` aren't in your `.gitignore`):
+   ```bash
+   git add data/dse_history.csv.gz
+   git commit -m "Update DSE snapshot"
+   git push
+   ```
+3. Streamlit Cloud redeploys, and whenever live DSE data can't be fetched the app **falls back to the snapshot automatically**, with a warning that states the snapshot's last date and how old it is.
+4. **Repeat after each trading day** you want fresh data (DSE publishes day-end data after the close). The screens only know what is in the snapshot, so they are as current as your last update.
+
+What to expect on the cloud: every screen (Breadth, Momentum, Volume Spike, Narrow Range, Tendon, Pin Bar, Pullback, Anticipation, Gap-Up) works from the snapshot. The **Live tab** needs live DSE data, so it stays empty there unless you use a proxy (below); running the app on your own computer keeps it fully live.
+
+Also in this version:
+- bdshare's HTTP session now sends ordinary **browser headers** (it used to identify itself as `bdshare/2.0`, which web firewalls often refuse). This is best effort: it can help if DSE filters by user agent, but it can't beat an IP-address block.
+- **Optional proxy:** set a `DSE_PROXY_URL` secret (Streamlit Cloud: App settings, then Secrets, e.g. `DSE_PROXY_URL = "http://user:pass@host:port"`) or environment variable to route DSE requests through a proxy that DSE doesn't block, ideally one located in Bangladesh. Free proxies are unreliable, so treat this as a last resort.
+- A failed download is **no longer cached** (it used to be remembered for 12 hours for the trading codes and 30 minutes for history), so the app retries on the next run.
+- If DSE's trading-code list can't be fetched, the app uses the symbols found in the price history for the "Equities only" filter. Previously an unreachable code list made that filter drop every symbol.
+
+Tested by simulating the blocked response (including the exact `Last error: None` message) against the real app, with and without a snapshot, plus recovery once DSE is reachable again, and the snapshot script's create, merge, trim and failure paths. Not tested against the real dse.com.bd or Streamlit Cloud, which the sandbox it was built in can't reach.
+
 ## What it does
 
 **Market Breadth tab** — same Stockbee-style ratios as the US version (% up/down 4%+ today, momentum-burst windows, quarterly participation), computed across your filtered DSE universe. Note: with only a few hundred stocks, these percentages are noisier than in a bigger market — a handful of names moving can swing the ratio more.
