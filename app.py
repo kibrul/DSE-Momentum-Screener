@@ -42,6 +42,7 @@ from utils.gap_up_scan import (
     DEFAULT_WINDOW as GAP_WINDOW, DEFAULT_MIN_GAP_PCT as GAP_MIN_PCT,
     DEFAULT_MIN_RVOL as GAP_MIN_RVOL, DEFAULT_MIN_VOLUME as GAP_MIN_VOL,
 )
+from utils.top_gainers import build_top_gainers, RVOL_LAST_VS_RANGE, RVOL_RANGE_VS_HISTORY
 
 st.set_page_config(page_title="DSE Momentum & Breadth Screener", layout="wide")
 
@@ -123,10 +124,10 @@ if st.session_state.get("fetched"):
 
     st.success(f"Screening {len(price_data)} DSE symbols.")
 
-    tab_breadth, tab_momentum, tab_vol_spike, tab_narrow_range, tab_tendon, tab_pin_bar, tab_pullback, tab_anticipation, tab_gap, tab_live = st.tabs(
+    tab_breadth, tab_momentum, tab_vol_spike, tab_narrow_range, tab_tendon, tab_pin_bar, tab_pullback, tab_anticipation, tab_gap, tab_gainers, tab_live = st.tabs(
         ["📊 Market Breadth (Stockbee)", "🚀 Momentum Screener (Qullamaggie)",
          "📈 Volume Spike Scan", "🔍 Narrow Range Volume Spike", "🪢 Tendon Pattern",
-         "🔨 Bullish Pin Bar", "🎯 Pullback Pattern", "🔮 Anticipation", "⬆️ Gap-Up Scan", "🔴 Live"]
+         "🔨 Bullish Pin Bar", "🎯 Pullback Pattern", "🔮 Anticipation", "⬆️ Gap-Up Scan", "🏆 Top 18 Gainers", "🔴 Live"]
     )
 
     # ---------------- Breadth tab ----------------
@@ -691,6 +692,77 @@ if st.session_state.get("fetched"):
                     height=300,
                 )
                 st.caption("The flat line is the reference close before the gap; price holding above it means the gap is holding.")
+
+    # ---------------- Top 18 Gainers tab ----------------
+    with tab_gainers:
+        st.subheader("Top 18 Ordinary Shares by Price Gain")
+        st.caption(
+            "Ranks ordinary shares by % price gain between two dates inside the loaded history. Gain is measured "
+            "from each share's close on its first available day in the range to its close on its last available "
+            "day. Prices are in BDT (৳). Pick a longer 'History lookback' in the sidebar for more dates to choose from."
+        )
+
+        ordinary = set(filter_equity_codes(list(price_data)))   # ordinary shares only: no mutual funds / bonds / debentures
+        gain_data = {k: v for k, v in price_data.items() if k in ordinary}
+
+        if not gain_data:
+            st.warning("No ordinary shares in the loaded data.")
+        else:
+            data_min = min(df.index.min() for df in gain_data.values()).date()
+            data_max = max(df.index.max() for df in gain_data.values()).date()
+            bounds = f"{data_min}_{data_max}"   # new bounds (e.g. a different lookback) -> fresh widgets, never an out-of-range value
+
+            gd1, gd2, gd3 = st.columns([1, 1, 2])
+            with gd1:
+                gain_start = st.date_input("Start date", value=data_min, min_value=data_min, max_value=data_max,
+                                           key=f"gain_start_{bounds}")
+            with gd2:
+                gain_end = st.date_input("End date", value=data_max, min_value=data_min, max_value=data_max,
+                                         key=f"gain_end_{bounds}")
+            with gd3:
+                gain_rvol_options = {
+                    "Last day ÷ average of the range": RVOL_LAST_VS_RANGE,
+                    "Range average ÷ full-history average": RVOL_RANGE_VS_HISTORY,
+                }
+                gain_rvol_label = st.radio("RVOL basis", list(gain_rvol_options), horizontal=True, key="gain_rvol")
+
+            if gain_start >= gain_end:
+                st.warning("The start date must be before the end date.")
+            else:
+                gain_df, gain_meta = build_top_gainers(
+                    gain_data, gain_start, gain_end, rvol_mode=gain_rvol_options[gain_rvol_label],
+                )
+                if gain_df.empty:
+                    st.warning("No ordinary share has two or more trading days with a close in this date range.")
+                else:
+                    st.success(
+                        f"Top {len(gain_df)} of {gain_meta['universe']} ordinary shares, "
+                        f"{gain_meta['first_date']:%Y-%m-%d} to {gain_meta['last_date']:%Y-%m-%d}."
+                    )
+                    st.dataframe(
+                        gain_df, hide_index=True, use_container_width=True,
+                        column_config={
+                            "Rank": st.column_config.NumberColumn("Rank", format="%d"),
+                            "First_Day": st.column_config.NumberColumn("First_Day", format="%.2f"),
+                            "Last_Day": st.column_config.NumberColumn("Last_Day", format="%.2f"),
+                            "% Gain": st.column_config.NumberColumn("% Gain", format="%.2f%%"),
+                            "% ADR": st.column_config.NumberColumn("% ADR", format="%.2f%%"),
+                            "% GAP": st.column_config.NumberColumn("% GAP", format="%.2f%%"),
+                            "RVOL": st.column_config.NumberColumn("RVOL", format="%.2f"),
+                            "% RS": st.column_config.NumberColumn("% RS", format="%.2f"),
+                        },
+                    )
+                    st.caption(
+                        "**First_Day / Last_Day** = closing prices on the first / last available day. **% ADR** = average "
+                        "daily range, (High/Low - 1), over days the share traded. **% GAP** = the largest opening gap-up in "
+                        "the range versus DSE's YCP (blank if none). **RVOL** = relative volume on the basis chosen above. "
+                        "**% RS** = the share's % Gain percentile among all ordinary shares ranked for this range (100 = the "
+                        "top). **Big_Volume_Day** = the day with the most volume, as date (volume). Days with no trades are "
+                        "left out of ADR, gap, RVOL and Big_Volume_Day. 'Ordinary shares' excludes mutual funds, bonds, "
+                        "debentures, Sukuk and preference shares by their trading codes (a heuristic). Prices are not adjusted "
+                        "for dividends or bonus shares, and illiquid shares can top a gain ranking on very little volume, so "
+                        "check RVOL and Big_Volume_Day."
+                    )
 
     # ---------------- Live tab ----------------
     with tab_live:

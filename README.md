@@ -130,6 +130,24 @@ Also in this version:
 
 Tested by simulating the blocked response (including the exact `Last error: None` message) against the real app, with and without a snapshot, plus recovery once DSE is reachable again, and the snapshot script's create, merge, trim and failure paths. Not tested against the real dse.com.bd or Streamlit Cloud, which the sandbox it was built in can't reach.
 
+## Top 18 Gainers tab
+
+Ranks the **top 18 ordinary shares by % price gain** between a **start date** and an **end date** you pick anywhere inside the loaded history (the default is the whole window; the sidebar's "History lookback" sets how far back you can choose). Columns: `Rank | Symbol | First_Day | Last_Day | % Gain | % ADR | % GAP | RVOL | % RS | Big_Volume_Day`.
+
+- **First_Day / Last_Day** are the **closing prices** on the share's first and last available day in the range (the same layout as your `table.xlsx`). A start or end date that isn't a trading day uses the first trading day on/after the start and the last on/before the end; a share that only began trading inside the range is measured from its own first close.
+- **% Gain** = (Last_Day / First_Day - 1) x 100. **Rank** 1 = the biggest gain.
+- **% ADR** = average daily range, the mean of (High / Low - 1) x 100.
+- **% GAP** = the **largest opening gap-up** in the range, measured against DSE's YCP (the exchange-adjusted previous close; the previous Close if YCP is missing). Blank when no day gapped up.
+- **RVOL** = relative volume. "Within the range" can be read two ways, so the tab has a switch: **Last day / average of the range** (default: the Last_Day volume divided by the average volume of the other traded days in the range) or **range average / full-history average** (the average volume in the range divided by the average over all the loaded history).
+- **% RS** = relative strength as a **percentile (0-100) of the share's % Gain among every ordinary share ranked for that range**, not just the top 18, so the leaders sit near 100.
+- **Big_Volume_Day** = the day with the largest volume in the range, written `YYYY-MM-DD (volume)`.
+
+Days with no trades (volume 0, a carried-forward price) are left out of ADR, gap, RVOL and Big_Volume_Day. "Ordinary shares" excludes mutual funds, bonds, debentures, Sukuk and preference shares by their trading codes, a heuristic since DSE's data has no instrument-type field. Prices are not adjusted for dividends or bonus shares, and an illiquid share can top a gain ranking on very little volume, so check RVOL and Big_Volume_Day.
+
+`requirements.txt` now pins `bdshare==1.2.8` (it was 1.2.3) to match the version you run. I checked that 1.2.8 exposes everything this app uses with the same historical-data columns; it was not run against the live DSE site.
+
+Tested by hand-checking every column on a stock with known numbers (including a no-trade day and a YCP gap), comparing the module with an independently written reference over several date ranges and both RVOL bases, edge cases (weekend dates, ranges outside the data, reversed dates, late-starting and never-traded shares, ties), and by running the real app headlessly.
+
 ## What it does
 
 **Market Breadth tab** — same Stockbee-style ratios as the US version (% up/down 4%+ today, momentum-burst windows, quarterly participation), computed across your filtered DSE universe. Note: with only a few hundred stocks, these percentages are noisier than in a bigger market — a handful of names moving can swing the ratio more.
