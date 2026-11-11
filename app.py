@@ -63,8 +63,8 @@ with st.sidebar:
         format_func=lambda d: f"{d} days (~{d // 30} months)",
         index=1,
     )
-    min_price = st.number_input("Min last close (BDT)", min_value=3.0, value=0.0, step=1.0)
-    max_price = st.number_input("Max last close (BDT)", min_value=900.0, value=0.0, step=1.0,
+    min_price = st.number_input("Min last close (BDT)", min_value=0.0, value=3.0, step=1.0)
+    max_price = st.number_input("Max last close (BDT)", min_value=0.0, value=900.0, step=1.0,
                                  help="Leave at 0 for no upper limit.")
 
     st.header("Momentum Screen Settings")
