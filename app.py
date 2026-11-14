@@ -42,7 +42,7 @@ from utils.gap_up_scan import (
     DEFAULT_WINDOW as GAP_WINDOW, DEFAULT_MIN_GAP_PCT as GAP_MIN_PCT,
     DEFAULT_MIN_RVOL as GAP_MIN_RVOL, DEFAULT_MIN_VOLUME as GAP_MIN_VOL,
 )
-from utils.top_gainers import build_top_gainers, RVOL_LAST_VS_RANGE, RVOL_RANGE_VS_HISTORY
+from utils.top_gainers import build_top_gainers, build_symbol_report, RVOL_LAST_VS_RANGE, RVOL_RANGE_VS_HISTORY
 
 st.set_page_config(page_title="DSE Momentum & Breadth Screener", layout="wide")
 
@@ -63,12 +63,12 @@ with st.sidebar:
         format_func=lambda d: f"{d} days (~{d // 30} months)",
         index=1,
     )
-    min_price = st.number_input("Min last close (BDT)", min_value=0.0, value=3.0, step=1.0)
-    max_price = st.number_input("Max last close (BDT)", min_value=0.0, value=900.0, step=1.0,
+    min_price = st.number_input("Min last close (BDT)", min_value=0.0, value=0.0, step=1.0)
+    max_price = st.number_input("Max last close (BDT)", min_value=0.0, value=0.0, step=1.0,
                                  help="Leave at 0 for no upper limit.")
 
     st.header("Momentum Screen Settings")
-    min_rs_rank = st.slider("Minimum RS Rank (percentile)", 50, 99, 60)
+    min_rs_rank = st.slider("Minimum RS Rank (percentile)", 50, 99, 80)
 
     run_button = st.button("Run Screen", type="primary", use_container_width=True)
 
@@ -124,10 +124,10 @@ if st.session_state.get("fetched"):
 
     st.success(f"Screening {len(price_data)} DSE symbols.")
 
-    tab_breadth, tab_momentum, tab_vol_spike, tab_narrow_range, tab_tendon, tab_pin_bar, tab_pullback, tab_anticipation, tab_gap, tab_gainers, tab_live = st.tabs(
+    tab_breadth, tab_momentum, tab_vol_spike, tab_narrow_range, tab_tendon, tab_pin_bar, tab_pullback, tab_anticipation, tab_gap, tab_gainers, tab_symbol, tab_live = st.tabs(
         ["📊 Market Breadth (Stockbee)", "🚀 Momentum Screener (Qullamaggie)",
          "📈 Volume Spike Scan", "🔍 Narrow Range Volume Spike", "🪢 Tendon Pattern",
-         "🔨 Bullish Pin Bar", "🎯 Pullback Pattern", "🔮 Anticipation", "⬆️ Gap-Up Scan", "🏆 Top 18 Gainers", "🔴 Live"]
+         "🔨 Bullish Pin Bar", "🎯 Pullback Pattern", "🔮 Anticipation", "⬆️ Gap-Up Scan", "🏆 Top 18 Gainers", "🔎 Check Symbol", "🔴 Live"]
     )
 
     # ---------------- Breadth tab ----------------
@@ -693,6 +693,18 @@ if st.session_state.get("fetched"):
                 )
                 st.caption("The flat line is the reference close before the gap; price holding above it means the gap is holding.")
 
+    # Column formatting shared by the Top 18 Gainers and Check Symbol tables
+    GAIN_COLUMN_CONFIG = {
+        "Rank": st.column_config.NumberColumn("Rank", format="%d"),
+        "First_Day": st.column_config.NumberColumn("First_Day", format="%.2f"),
+        "Last_Day": st.column_config.NumberColumn("Last_Day", format="%.2f"),
+        "% Gain": st.column_config.NumberColumn("% Gain", format="%.2f%%"),
+        "% ADR": st.column_config.NumberColumn("% ADR", format="%.2f%%"),
+        "% GAP": st.column_config.NumberColumn("% GAP", format="%.2f%%"),
+        "RVOL": st.column_config.NumberColumn("RVOL", format="%.2f"),
+        "% RS": st.column_config.NumberColumn("% RS", format="%.2f"),
+    }
+
     # ---------------- Top 18 Gainers tab ----------------
     with tab_gainers:
         st.subheader("Top 18 Ordinary Shares by Price Gain")
@@ -741,16 +753,7 @@ if st.session_state.get("fetched"):
                     )
                     st.dataframe(
                         gain_df, hide_index=True, use_container_width=True,
-                        column_config={
-                            "Rank": st.column_config.NumberColumn("Rank", format="%d"),
-                            "First_Day": st.column_config.NumberColumn("First_Day", format="%.2f"),
-                            "Last_Day": st.column_config.NumberColumn("Last_Day", format="%.2f"),
-                            "% Gain": st.column_config.NumberColumn("% Gain", format="%.2f%%"),
-                            "% ADR": st.column_config.NumberColumn("% ADR", format="%.2f%%"),
-                            "% GAP": st.column_config.NumberColumn("% GAP", format="%.2f%%"),
-                            "RVOL": st.column_config.NumberColumn("RVOL", format="%.2f"),
-                            "% RS": st.column_config.NumberColumn("% RS", format="%.2f"),
-                        },
+                        column_config=GAIN_COLUMN_CONFIG,
                     )
                     st.caption(
                         "**First_Day / Last_Day** = closing prices on the first / last available day. **% ADR** = average "
@@ -762,6 +765,70 @@ if st.session_state.get("fetched"):
                         "debentures, Sukuk and preference shares by their trading codes (a heuristic). Prices are not adjusted "
                         "for dividends or bonus shares, and illiquid shares can top a gain ranking on very little volume, so "
                         "check RVOL and Big_Volume_Day."
+                    )
+
+    # ---------------- Check Symbol tab ----------------
+    with tab_symbol:
+        st.subheader("Check a Symbol")
+        st.caption(
+            "Pick one or more DSE ordinary shares and a date range to get the same figures as the Top 18 Gainers "
+            "tab. Rank and % RS are the share's real position and percentile among ALL ordinary shares ranked for "
+            "that date range, so you can see how it stacks up. Prices are in BDT (৳)."
+        )
+
+        ordinary_s = set(filter_equity_codes(list(price_data)))   # ordinary shares only: no mutual funds / bonds / debentures
+        sym_data = {k: v for k, v in price_data.items() if k in ordinary_s}
+
+        if not sym_data:
+            st.warning("No ordinary shares in the loaded data.")
+        else:
+            sym_min = min(df.index.min() for df in sym_data.values()).date()
+            sym_max = max(df.index.max() for df in sym_data.values()).date()
+            sym_options = sorted(sym_data)
+            sym_bounds = f"{sym_min}_{sym_max}_{len(sym_options)}"   # new data -> fresh widgets, never a stale selection
+
+            sym_choice = st.multiselect(
+                f"Symbol(s), {len(sym_options)} ordinary shares (type to search)", sym_options,
+                key=f"chk_symbols_{sym_bounds}", placeholder="Choose one or more symbols",
+            )
+
+            sc1, sc2, sc3 = st.columns([1, 1, 2])
+            with sc1:
+                sym_start = st.date_input("Start date", value=sym_min, min_value=sym_min, max_value=sym_max,
+                                          key=f"chk_start_{sym_bounds}")
+            with sc2:
+                sym_end = st.date_input("End date", value=sym_max, min_value=sym_min, max_value=sym_max,
+                                        key=f"chk_end_{sym_bounds}")
+            with sc3:
+                sym_rvol_options = {
+                    "Last day ÷ average of the range": RVOL_LAST_VS_RANGE,
+                    "Range average ÷ full-history average": RVOL_RANGE_VS_HISTORY,
+                }
+                sym_rvol_label = st.radio("RVOL basis", list(sym_rvol_options), horizontal=True, key="chk_rvol")
+
+            if not sym_choice:
+                st.info("Choose one or more symbols above to see their figures for the date range.")
+            elif sym_start >= sym_end:
+                st.warning("The start date must be before the end date.")
+            else:
+                sym_df, sym_meta, sym_skipped = build_symbol_report(
+                    sym_data, sym_choice, sym_start, sym_end, rvol_mode=sym_rvol_options[sym_rvol_label],
+                )
+                if sym_skipped:
+                    st.warning("No two trading days with a close in this date range for: " + ", ".join(sym_skipped) + ".")
+                if not sym_df.empty:
+                    st.success(
+                        f"{len(sym_df)} symbol(s), ranked among {sym_meta['universe']} ordinary shares, "
+                        f"{sym_meta['first_date']:%Y-%m-%d} to {sym_meta['last_date']:%Y-%m-%d}."
+                    )
+                    st.dataframe(sym_df, hide_index=True, use_container_width=True, column_config=GAIN_COLUMN_CONFIG)
+                    st.caption(
+                        "**Rank** = the share's position by % Gain among all ordinary shares ranked for this range "
+                        "(1 = biggest gain); **% RS** = its gain percentile among them (100 = the top). The other columns are "
+                        "as in the Top 18 Gainers tab: First_Day / Last_Day are closing prices on the first / last available "
+                        "day, % ADR is the average daily range, % GAP the largest opening gap-up versus YCP (blank if none), "
+                        "RVOL the relative volume on the basis chosen above, Big_Volume_Day the day with the most volume as "
+                        "date (volume). Days with no trades are left out of ADR, gap, RVOL and Big_Volume_Day."
                     )
 
     # ---------------- Live tab ----------------
