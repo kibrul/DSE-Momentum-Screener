@@ -1,5 +1,6 @@
 """
-Top gainers: ranks ordinary shares by price gain between two dates chosen inside the loaded history.
+Top gainers: ranks ordinary shares by price gain between two dates chosen inside the loaded history, and
+reports the same table for specific symbols you pick (build_symbol_report).
 
 Output columns
     Rank | Symbol | First_Day | Last_Day | % Gain | % ADR | % GAP | RVOL | % RS | Big_Volume_Day
@@ -99,40 +100,78 @@ def _range_stats(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, rvol_
             "rvol": rvol, "big_day": big_day, "first_date": df.index[first_i], "last_date": df.index[last_i]}
 
 
-def build_top_gainers(price_data: dict, start_date, end_date, top_n: int = TOP_N,
-                      rvol_mode: str = RVOL_LAST_VS_RANGE):
+_EMPTY_META = {"universe": 0, "first_date": None, "last_date": None}
+
+
+def _rank_universe(price_data: dict, start_date, end_date, rvol_mode: str) -> pd.DataFrame:
     """
-    Returns (table, meta). `table` has COLUMNS (empty if nothing qualifies); `meta` has the number of shares ranked
-    (the % RS universe) and the earliest first / latest last trading date seen in the range.
+    Per-share stats for EVERY share with a gain in [start, end], indexed by symbol, best gain first, with
+    `rank` (1 = biggest gain; tied gains are ordered alphabetically) and `rs` (the gain percentile, 0-100).
+    Empty DataFrame when the range is invalid or nothing qualifies.
     """
     start, end = pd.Timestamp(start_date).normalize(), pd.Timestamp(end_date).normalize()
-    empty = pd.DataFrame(columns=COLUMNS)
     if end <= start:
-        return empty, {"universe": 0, "first_date": None, "last_date": None}
-
+        return pd.DataFrame()
     rows = {}
     for symbol in sorted(price_data):
         stats = _range_stats(price_data[symbol], start, end, rvol_mode)
         if stats is not None:
             rows[symbol] = stats
     if not rows:
-        return empty, {"universe": 0, "first_date": None, "last_date": None}
-
+        return pd.DataFrame()
     stats = pd.DataFrame.from_dict(rows, orient="index")
     stats["rs"] = stats["gain"].rank(pct=True) * 100          # percentile among every ranked share
-    top = stats.sort_values("gain", ascending=False, kind="mergesort").head(top_n)
+    stats = stats.sort_values("gain", ascending=False, kind="mergesort")
+    stats["rank"] = np.arange(1, len(stats) + 1)
+    return stats
 
-    table = pd.DataFrame({
-        "Rank": np.arange(1, len(top) + 1),
-        "Symbol": top.index,
-        "First_Day": top["first_close"].round(2).to_numpy(),
-        "Last_Day": top["last_close"].round(2).to_numpy(),
-        "% Gain": top["gain"].round(2).to_numpy(),
-        "% ADR": top["adr"].round(2).to_numpy(),
-        "% GAP": top["gap"].round(2).to_numpy(),
-        "RVOL": top["rvol"].round(2).to_numpy(),
-        "% RS": top["rs"].round(2).to_numpy(),
-        "Big_Volume_Day": top["big_day"].to_numpy(),
+
+def _to_table(stats: pd.DataFrame) -> pd.DataFrame:
+    return pd.DataFrame({
+        "Rank": stats["rank"].to_numpy(),
+        "Symbol": stats.index,
+        "First_Day": stats["first_close"].round(2).to_numpy(),
+        "Last_Day": stats["last_close"].round(2).to_numpy(),
+        "% Gain": stats["gain"].round(2).to_numpy(),
+        "% ADR": stats["adr"].round(2).to_numpy(),
+        "% GAP": stats["gap"].round(2).to_numpy(),
+        "RVOL": stats["rvol"].round(2).to_numpy(),
+        "% RS": stats["rs"].round(2).to_numpy(),
+        "Big_Volume_Day": stats["big_day"].to_numpy(),
     })[COLUMNS]
-    meta = {"universe": len(stats), "first_date": stats["first_date"].min(), "last_date": stats["last_date"].max()}
-    return table, meta
+
+
+def _meta(stats: pd.DataFrame) -> dict:
+    return {"universe": len(stats), "first_date": stats["first_date"].min(), "last_date": stats["last_date"].max()}
+
+
+def build_top_gainers(price_data: dict, start_date, end_date, top_n: int = TOP_N,
+                      rvol_mode: str = RVOL_LAST_VS_RANGE):
+    """
+    Returns (table, meta). `table` has COLUMNS (empty if nothing qualifies); `meta` has the number of shares ranked
+    (the % RS universe) and the earliest first / latest last trading date seen in the range.
+    """
+    stats = _rank_universe(price_data, start_date, end_date, rvol_mode)
+    if stats.empty:
+        return pd.DataFrame(columns=COLUMNS), dict(_EMPTY_META)
+    return _to_table(stats.head(top_n)), _meta(stats)
+
+
+def build_symbol_report(price_data: dict, symbols, start_date, end_date, rvol_mode: str = RVOL_LAST_VS_RANGE):
+    """
+    The same table for the symbols you pick, instead of the top 18. Every number is exactly what that symbol would
+    show in the full ranking, so `Rank` is its REAL position by % Gain among all shares in `price_data` ranked for
+    the range (not 1..n) and `% RS` its percentile among them. Rows come back best rank first.
+
+    Returns (table, meta, skipped): `skipped` lists picked symbols that can't be ranked (unknown, or fewer than two
+    days with a close in the range).
+    """
+    wanted = list(dict.fromkeys(symbols))                       # drop duplicates, keep order
+    stats = _rank_universe(price_data, start_date, end_date, rvol_mode)
+    if stats.empty:
+        return pd.DataFrame(columns=COLUMNS), dict(_EMPTY_META), wanted
+    chosen = [s for s in wanted if s in stats.index]
+    skipped = [s for s in wanted if s not in stats.index]
+    if not chosen:
+        return pd.DataFrame(columns=COLUMNS), _meta(stats), skipped
+    return _to_table(stats.loc[chosen].sort_values("rank")), _meta(stats), skipped

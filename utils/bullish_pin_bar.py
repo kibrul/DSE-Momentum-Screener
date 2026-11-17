@@ -23,10 +23,10 @@ implied once lower_wick >= 2/3 leaves little room for body + upper wick.
 import pandas as pd
 
 DEFAULT_WINDOW = 3
-DEFAULT_MIN_LOWER_WICK_PCT = 66.67   # at least two-thirds of total range
-DEFAULT_MAX_UPPER_WICK_PCT = 10.0    # keeps the body near the top (minimal upper wick)
-DEFAULT_MAX_BODY_PCT = 33.0          # small real body
-DEFAULT_REQUIRE_GREEN_BODY = True    # Close > Open, for a strictly "bullish" (green) pin bar
+DEFAULT_MIN_LOWER_WICK_PCT = 69.00   # at least two-thirds of total range
+DEFAULT_MAX_UPPER_WICK_PCT = 3.0    # keeps the body near the top (minimal upper wick)
+DEFAULT_MAX_BODY_PCT = 31.0          # small real body
+DEFAULT_REQUIRE_GREEN_BODY = False    # Close > Open, for a strictly "bullish" (green) pin bar
 DEFAULT_REQUIRE_VOLUME_CONFIRMATION = True  # day's Volume >= prior day's Volume
 
 

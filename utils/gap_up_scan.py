@@ -22,12 +22,12 @@ Pure price/volume geometry, so nothing here is market-specific; used by both the
 import numpy as np
 import pandas as pd
 
-DEFAULT_WINDOW = 21            # trading days, about one month
-DEFAULT_MIN_GAP_PCT = 9.0
-DEFAULT_MIN_RVOL = 2.0
-DEFAULT_MIN_VOLUME = 0         # shares; 0 = no absolute minimum
-AVG_VOLUME_DAYS = 20
-MIN_BASELINE_DAYS = 10
+DEFAULT_WINDOW = 3            # trading days, about one month
+DEFAULT_MIN_GAP_PCT = 3.0
+DEFAULT_MIN_RVOL = 1.9
+DEFAULT_MIN_VOLUME = 190000         # shares; 0 = no absolute minimum
+AVG_VOLUME_DAYS = 18
+MIN_BASELINE_DAYS = 9
 
 
 def _reference_close(c, ycp, t):
