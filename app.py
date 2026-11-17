@@ -42,7 +42,13 @@ from utils.gap_up_scan import (
     DEFAULT_WINDOW as GAP_WINDOW, DEFAULT_MIN_GAP_PCT as GAP_MIN_PCT,
     DEFAULT_MIN_RVOL as GAP_MIN_RVOL, DEFAULT_MIN_VOLUME as GAP_MIN_VOL,
 )
-from utils.top_gainers import build_top_gainers, RVOL_LAST_VS_RANGE, RVOL_RANGE_VS_HISTORY
+from utils.top_gainers import build_top_gainers, build_symbol_report, RVOL_LAST_VS_RANGE, RVOL_RANGE_VS_HISTORY
+from utils.parabolic_long import (
+    build_parabolic_long_screen, parabolic_chart_data,
+    DEFAULT_FALL_WINDOW as PL_FALL_WINDOW, DEFAULT_MIN_FALL_PCT as PL_MIN_FALL,
+    DEFAULT_MIN_DOWN_DAYS as PL_MIN_DOWN, DEFAULT_MIN_BELOW_MA9_PCT as PL_MIN_BELOW9,
+    DEFAULT_HIGH_WINDOW as PL_HIGH_WINDOW, DEFAULT_MIN_EXTENSION_PCT as PL_MIN_EXT,
+)
 
 st.set_page_config(page_title="DSE Momentum & Breadth Screener", layout="wide")
 
@@ -124,10 +130,10 @@ if st.session_state.get("fetched"):
 
     st.success(f"Screening {len(price_data)} DSE symbols.")
 
-    tab_breadth, tab_momentum, tab_vol_spike, tab_narrow_range, tab_tendon, tab_pin_bar, tab_pullback, tab_anticipation, tab_gap, tab_gainers, tab_live = st.tabs(
+    tab_breadth, tab_momentum, tab_vol_spike, tab_narrow_range, tab_tendon, tab_pin_bar, tab_pullback, tab_anticipation, tab_gap, tab_gainers, tab_symbol, tab_parabolic, tab_live = st.tabs(
         ["📊 Market Breadth (Stockbee)", "🚀 Momentum Screener (Qullamaggie)",
          "📈 Volume Spike Scan", "🔍 Narrow Range Volume Spike", "🪢 Tendon Pattern",
-         "🔨 Bullish Pin Bar", "🎯 Pullback Pattern", "🔮 Anticipation", "⬆️ Gap-Up Scan", "🏆 Top 18 Gainers", "🔴 Live"]
+         "🔨 Bullish Pin Bar", "🎯 Pullback Pattern", "🔮 Anticipation", "⬆️ Gap-Up Scan", "🏆 Top 18 Gainers", "🔎 Check Symbol", "📉 Parabolic Long", "🔴 Live"]
     )
 
     # ---------------- Breadth tab ----------------
@@ -693,6 +699,18 @@ if st.session_state.get("fetched"):
                 )
                 st.caption("The flat line is the reference close before the gap; price holding above it means the gap is holding.")
 
+    # Column formatting shared by the Top 18 Gainers and Check Symbol tables
+    GAIN_COLUMN_CONFIG = {
+        "Rank": st.column_config.NumberColumn("Rank", format="%d"),
+        "First_Day": st.column_config.NumberColumn("First_Day", format="%.2f"),
+        "Last_Day": st.column_config.NumberColumn("Last_Day", format="%.2f"),
+        "% Gain": st.column_config.NumberColumn("% Gain", format="%.2f%%"),
+        "% ADR": st.column_config.NumberColumn("% ADR", format="%.2f%%"),
+        "% GAP": st.column_config.NumberColumn("% GAP", format="%.2f%%"),
+        "RVOL": st.column_config.NumberColumn("RVOL", format="%.2f"),
+        "% RS": st.column_config.NumberColumn("% RS", format="%.2f"),
+    }
+
     # ---------------- Top 18 Gainers tab ----------------
     with tab_gainers:
         st.subheader("Top 18 Ordinary Shares by Price Gain")
@@ -741,16 +759,7 @@ if st.session_state.get("fetched"):
                     )
                     st.dataframe(
                         gain_df, hide_index=True, use_container_width=True,
-                        column_config={
-                            "Rank": st.column_config.NumberColumn("Rank", format="%d"),
-                            "First_Day": st.column_config.NumberColumn("First_Day", format="%.2f"),
-                            "Last_Day": st.column_config.NumberColumn("Last_Day", format="%.2f"),
-                            "% Gain": st.column_config.NumberColumn("% Gain", format="%.2f%%"),
-                            "% ADR": st.column_config.NumberColumn("% ADR", format="%.2f%%"),
-                            "% GAP": st.column_config.NumberColumn("% GAP", format="%.2f%%"),
-                            "RVOL": st.column_config.NumberColumn("RVOL", format="%.2f"),
-                            "% RS": st.column_config.NumberColumn("% RS", format="%.2f"),
-                        },
+                        column_config=GAIN_COLUMN_CONFIG,
                     )
                     st.caption(
                         "**First_Day / Last_Day** = closing prices on the first / last available day. **% ADR** = average "
@@ -763,6 +772,158 @@ if st.session_state.get("fetched"):
                         "for dividends or bonus shares, and illiquid shares can top a gain ranking on very little volume, so "
                         "check RVOL and Big_Volume_Day."
                     )
+
+    # ---------------- Check Symbol tab ----------------
+    with tab_symbol:
+        st.subheader("Check a Symbol")
+        st.caption(
+            "Pick one or more DSE ordinary shares and a date range to get the same figures as the Top 18 Gainers "
+            "tab. Rank and % RS are the share's real position and percentile among ALL ordinary shares ranked for "
+            "that date range, so you can see how it stacks up. Prices are in BDT (৳)."
+        )
+
+        ordinary_s = set(filter_equity_codes(list(price_data)))   # ordinary shares only: no mutual funds / bonds / debentures
+        sym_data = {k: v for k, v in price_data.items() if k in ordinary_s}
+
+        if not sym_data:
+            st.warning("No ordinary shares in the loaded data.")
+        else:
+            sym_min = min(df.index.min() for df in sym_data.values()).date()
+            sym_max = max(df.index.max() for df in sym_data.values()).date()
+            sym_options = sorted(sym_data)
+            sym_bounds = f"{sym_min}_{sym_max}_{len(sym_options)}"   # new data -> fresh widgets, never a stale selection
+
+            sym_choice = st.multiselect(
+                f"Symbol(s), {len(sym_options)} ordinary shares (type to search)", sym_options,
+                key=f"chk_symbols_{sym_bounds}", placeholder="Choose one or more symbols",
+            )
+
+            sc1, sc2, sc3 = st.columns([1, 1, 2])
+            with sc1:
+                sym_start = st.date_input("Start date", value=sym_min, min_value=sym_min, max_value=sym_max,
+                                          key=f"chk_start_{sym_bounds}")
+            with sc2:
+                sym_end = st.date_input("End date", value=sym_max, min_value=sym_min, max_value=sym_max,
+                                        key=f"chk_end_{sym_bounds}")
+            with sc3:
+                sym_rvol_options = {
+                    "Last day ÷ average of the range": RVOL_LAST_VS_RANGE,
+                    "Range average ÷ full-history average": RVOL_RANGE_VS_HISTORY,
+                }
+                sym_rvol_label = st.radio("RVOL basis", list(sym_rvol_options), horizontal=True, key="chk_rvol")
+
+            if not sym_choice:
+                st.info("Choose one or more symbols above to see their figures for the date range.")
+            elif sym_start >= sym_end:
+                st.warning("The start date must be before the end date.")
+            else:
+                sym_df, sym_meta, sym_skipped = build_symbol_report(
+                    sym_data, sym_choice, sym_start, sym_end, rvol_mode=sym_rvol_options[sym_rvol_label],
+                )
+                if sym_skipped:
+                    st.warning("No two trading days with a close in this date range for: " + ", ".join(sym_skipped) + ".")
+                if not sym_df.empty:
+                    st.success(
+                        f"{len(sym_df)} symbol(s), ranked among {sym_meta['universe']} ordinary shares, "
+                        f"{sym_meta['first_date']:%Y-%m-%d} to {sym_meta['last_date']:%Y-%m-%d}."
+                    )
+                    st.dataframe(sym_df, hide_index=True, use_container_width=True, column_config=GAIN_COLUMN_CONFIG)
+                    st.caption(
+                        "**Rank** = the share's position by % Gain among all ordinary shares ranked for this range "
+                        "(1 = biggest gain); **% RS** = its gain percentile among them (100 = the top). The other columns are "
+                        "as in the Top 18 Gainers tab: First_Day / Last_Day are closing prices on the first / last available "
+                        "day, % ADR is the average daily range, % GAP the largest opening gap-up versus YCP (blank if none), "
+                        "RVOL the relative volume on the basis chosen above, Big_Volume_Day the day with the most volume as "
+                        "date (volume). Days with no trades are left out of ADR, gap, RVOL and Big_Volume_Day."
+                    )
+
+    # ---------------- Parabolic Long tab ----------------
+    with tab_parabolic:
+        st.subheader("Parabolic Long Scan")
+        st.caption(
+            "Finds stocks that have crashed hard, are still falling several days in a row, and sit far below their "
+            "9 and 18 day moving averages and well below their recent high: an exhausted, over-extended sell-off "
+            "that is a candidate for a sharp bounce. This lists the setup; it is not a buy signal. Prices are "
+            "adjusted for bonus shares and dividends using DSE's YCP, so a record-date price drop is not mistaken "
+            "for a crash. Prices are in BDT (৳)."
+        )
+
+        pl1, pl2, pl3 = st.columns(3)
+        with pl1:
+            pl_fall_window = st.number_input("Fall window (trading days)", min_value=3, max_value=120,
+                                             value=PL_FALL_WINDOW, key="pl_fall_window",
+                                             help="'Down 50-100%+ in a few days or weeks'.")
+            pl_min_fall = st.number_input("Min fall in that window (%)", min_value=1.0, max_value=100.0,
+                                          value=PL_MIN_FALL, step=1.0, key="pl_min_fall",
+                                          help="Last close versus the highest close in the fall window.")
+        with pl2:
+            pl_min_down = st.number_input("Min consecutive down days", min_value=1, max_value=15,
+                                          value=PL_MIN_DOWN, key="pl_min_down",
+                                          help="Down days in a row ending on the latest bar (3-5+). A flat or no-trade day ends the streak.")
+            pl_min_below9 = st.number_input("Min distance below the 9-day MA (%)", min_value=0.0, max_value=50.0,
+                                            value=PL_MIN_BELOW9, step=0.5, key="pl_min_below9",
+                                            help="3-9% is typical. The price must also be below the 18-day MA.")
+        with pl3:
+            pl_high_window = st.number_input("Recent-high window (trading days)", min_value=5, max_value=250,
+                                             value=PL_HIGH_WINDOW, key="pl_high_window")
+            pl_min_ext = st.number_input("Min extension below the recent high (%)", min_value=1.0, max_value=100.0,
+                                         value=PL_MIN_EXT, step=1.0, key="pl_min_ext",
+                                         help="Last close versus the highest High in the recent-high window.")
+
+        pl_df, pl_funnel = build_parabolic_long_screen(
+            price_data, fall_window=int(pl_fall_window), min_fall_pct=pl_min_fall, min_down_days=int(pl_min_down),
+            min_below_ma9_pct=pl_min_below9, high_window=int(pl_high_window), min_extension_pct=pl_min_ext,
+        )
+
+        if pl_funnel["stocks"] == 0:
+            st.warning("Not enough price history to evaluate any symbol (at least 20 trading days are needed).")
+        else:
+            st.caption(
+                f"Of **{pl_funnel['stocks']}** symbols, how many pass each condition on its own: "
+                f"fell ≥ {pl_min_fall:g}% in {int(pl_fall_window)} days: **{pl_funnel['fall']}** · "
+                f"{int(pl_min_down)}+ down days in a row: **{pl_funnel['down_days']}** · "
+                f"below the 9 and 18 day MAs, ≥ {pl_min_below9:g}% under the 9-day: **{pl_funnel['below_ma']}** · "
+                f"≥ {pl_min_ext:g}% below the {int(pl_high_window)}-day high: **{pl_funnel['extension']}** · "
+                f"**all conditions: {pl_funnel['all']}**."
+            )
+            if pl_df.empty:
+                lf, ls = pl_funnel["largest_fall"], pl_funnel["longest_streak"]
+                st.warning(
+                    "No symbols pass every condition. "
+                    f"The biggest fall in the {int(pl_fall_window)}-day window is {lf[1]:g}% ({lf[0]}) and the longest "
+                    f"down streak is {ls[1]} days ({ls[0]}). DSE's daily price limit (which has varied over time) "
+                    "caps how fast a stock can fall, so a 50% fall takes many sessions: if the counts above show the "
+                    "fall condition is what blocks the list, lower 'Min fall' or lengthen the fall window."
+                )
+            else:
+                st.success(f"{len(pl_df)} symbols pass every condition (biggest fall first).")
+                st.dataframe(
+                    pl_df, hide_index=True, use_container_width=True,
+                    column_config={
+                        "Last Close": st.column_config.NumberColumn("Last Close", format="%.2f"),
+                        "Fall %": st.column_config.NumberColumn("Fall %", format="%.2f%%"),
+                        "Below High %": st.column_config.NumberColumn("Below High %", format="%.2f%%"),
+                        "Down Days": st.column_config.NumberColumn("Down Days", format="%d"),
+                        "Streak Fall %": st.column_config.NumberColumn("Streak Fall %", format="%.2f%%"),
+                        "Below 9MA %": st.column_config.NumberColumn("Below 9MA %", format="%.2f%%"),
+                        "Below 18MA %": st.column_config.NumberColumn("Below 18MA %", format="%.2f%%"),
+                        "Recent High": st.column_config.NumberColumn("Recent High", format="%.2f"),
+                    },
+                )
+                st.caption(
+                    "**Fall %** = the last close versus the highest close in the fall window; **Below High %** = versus the "
+                    "highest High in the recent-high window; **Down Days** = consecutive down closes ending on the latest "
+                    "bar, with **Streak Fall %** the drop over that streak; **Below 9MA % / Below 18MA %** = how far the last "
+                    "close is under each simple moving average of Close. Prices are adjusted with DSE's YCP when the data has it."
+                )
+
+                st.divider()
+                st.subheader("Visual confirmation")
+                pl_choice = st.selectbox("Preview Close with its 9 / 18 day MAs for a matched symbol",
+                                         pl_df["Symbol"].tolist(), key="pl_preview_symbol")
+                if pl_choice:
+                    st.line_chart(parabolic_chart_data(price_data[pl_choice], bars=40), height=300)
+                    st.caption("Adjusted Close with the 9 and 18 day moving averages (the series the scan used).")
 
     # ---------------- Live tab ----------------
     with tab_live:
